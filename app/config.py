@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
@@ -6,6 +7,14 @@ class Settings(BaseSettings):
     un_api_url: str = "http://marketmind-united-nations-data:8000"
     pytrends_api_url: str = "http://marketmind-pytrends:8000"
     llm_api_url: str = "http://marketmind-ollma-llm:8000"
+    
+    # Provider routing: "claude", "gpt", or "ollama"
+    extraction_provider: str = "claude"
+    report_provider: str = "claude"
+    
+    # API Keys
+    anthropic_api_key: Optional[str] = None
+    openai_api_key: Optional[str] = None
     
 def get_settings():
     return Settings()

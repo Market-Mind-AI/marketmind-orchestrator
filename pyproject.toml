@@ -14,6 +14,9 @@ pydantic = "^2.10.0"
 pydantic-settings = "^2.7.0"
 langgraph = "^0.2.61"
 httpx = "^0.28.0"
+langchain-core = "^0.3.34"
+langchain-anthropic = "^0.3.5"
+langchain-openai = "^0.3.3"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"
