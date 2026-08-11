@@ -1,9 +1,12 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from app.graph import build_graph
+from app.config import get_settings
 import json
 
-app = FastAPI(title="MarketMind Orchestrator")
+settings = get_settings()
+
+app = FastAPI(title="MarketMind Orchestrator", root_path=settings.root_path)
 
 graph = build_graph()
 
