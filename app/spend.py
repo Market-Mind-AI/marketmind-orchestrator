@@ -19,10 +19,10 @@ would not add up to one number anyone looks at.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Iterator, Mapping
 
 
 @dataclass
