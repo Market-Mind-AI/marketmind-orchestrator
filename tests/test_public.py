@@ -244,3 +244,50 @@ def test_the_runner_names_itself_after_the_pod(monkeypatch: pytest.MonkeyPatch) 
     assert public.runner_id() == "marketmind-orchestrator-abc123"
 
     public.runner_id.cache_clear()
+
+
+async def test_the_claim_is_renewed_on_a_clock_while_the_run_lasts(scoring: AsyncMock) -> None:
+    """A lease is renewed on time, not on milestones. Renewing it only on
+    progress reports was wrong: one collection step runs for minutes without
+    reporting, and a claim that ages out mid-step tells another agent this
+    analysis is orphaned while it is very much alive."""
+    import asyncio
+
+    graph = AsyncMock()
+    running = asyncio.Event()
+
+    async def slow_run(_payload, config=None):
+        running.set()
+        await asyncio.sleep(3600)
+
+    graph.ainvoke = slow_run
+
+    with (
+        patch("app.graph.get_graph", return_value=graph),
+        patch.object(public, "_CLAIM_RENEWAL_SECONDS", 0.01),
+    ):
+        run = asyncio.create_task(public._run("r1"))
+        await running.wait()
+        await asyncio.sleep(0.05)
+        run.cancel()
+
+    assert scoring.claim_analysis.await_count >= 2, "the lease has to keep being renewed"
+
+
+async def test_the_claim_is_released_when_the_run_ends(scoring: AsyncMock) -> None:
+    """A lease still being renewed after the work stopped is the one thing that
+    would keep an orphan invisible."""
+    import asyncio
+
+    graph = AsyncMock()
+    graph.ainvoke = AsyncMock(return_value={})
+
+    with (
+        patch("app.graph.get_graph", return_value=graph),
+        patch.object(public, "_CLAIM_RENEWAL_SECONDS", 0.01),
+    ):
+        await public._run("r1")
+        before = scoring.claim_analysis.await_count
+        await asyncio.sleep(0.05)
+
+    assert scoring.claim_analysis.await_count == before, "nothing renews after the run is over"

@@ -185,6 +185,25 @@ async def resume_orphans() -> int:
     return resumed
 
 
+# A claim is a LEASE, and a lease is renewed on a clock. Renewing it on progress
+# reports alone was wrong: a single collection step can run for minutes without
+# reporting anything, and a claim that ages out mid-step tells another agent the
+# analysis is orphaned while it is very much alive. Half the staleness window,
+# so two renewals have to be missed before anyone else may take over.
+_CLAIM_RENEWAL_SECONDS = 45
+
+
+async def _hold_claim(analysis_id: str) -> None:
+    """Keep saying "this one is mine" for as long as the run lasts."""
+    core = _client()
+    while True:
+        await asyncio.sleep(_CLAIM_RENEWAL_SECONDS)
+        try:
+            await core.claim_analysis(analysis_id, runner=runner_id())
+        except Exception:  # noqa: BLE001 — a missed renewal is not a reason to stop the run
+            logger.warning("Could not renew the claim on analysis %s", analysis_id, exc_info=True)
+
+
 async def _run(analysis_id: str) -> None:
     """Drive the graph for one analysis, outside the request that asked for it.
 
@@ -204,6 +223,7 @@ async def _run(analysis_id: str) -> None:
         return
 
     config = {"configurable": {"thread_id": analysis_id}, "callbacks": callbacks()}
+    lease = asyncio.create_task(_hold_claim(analysis_id))
     try:
         with spend.tally():
             await graph.ainvoke({"analysis_id": analysis_id}, config=config)
@@ -213,6 +233,11 @@ async def _run(analysis_id: str) -> None:
             await _client().fail_analysis(analysis_id, "The analysis ended unexpectedly.")
         except Exception:  # noqa: BLE001
             logger.exception("Analysis %s could not even be marked failed", analysis_id)
+    finally:
+        # Released as soon as the run ends, however it ends. A lease still being
+        # renewed after the work stopped is the one thing that would keep an
+        # orphan invisible.
+        lease.cancel()
 
 
 @router.get("/analyze/{request_id}", summary="Read an analysis")
