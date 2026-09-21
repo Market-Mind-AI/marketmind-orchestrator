@@ -15,6 +15,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from app import observability, quality
 from app.scoring_client import ScoringClient, ScoringRejected, ScoringUnavailable
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,20 @@ async def collect_node(state: dict) -> dict:
     for country in state["countries"]:
         await core.record_progress(analysis_id, f"collecting {country}")
         try:
-            tasks.extend(await core.ensure_coverage(country, entity_key))
+            answer = await core.ensure_coverage(country, entity_key)
+            # The words this country was actually searched for. Logged because
+            # they are the one thing a model chose that nothing else exposes:
+            # get the native term wrong and the analysis is immaculate and
+            # about the wrong product.
+            logger.info(
+                "SEARCH TERMS %s (%s, %s): product=%s | category=%s",
+                country,
+                answer.get("location"),
+                answer.get("language"),
+                answer.get("search_terms"),
+                answer.get("category_terms"),
+            )
+            tasks.extend(answer.get("tasks", []))
             collected.append(country)
         except ScoringUnavailable as exc:
             # Transient by definition. Recorded, not raised: one country's
@@ -349,6 +363,20 @@ async def deliver_node(state: dict) -> dict:
     await _client().complete_analysis(
         state["analysis_id"], result=results, breakdown=state.get("breakdown")
     )
+
+    requested_scored = len([r for r in results if r.get("mos") is not None and r.get("country") in requested])
+    observability.record(
+        "analysis.complete",
+        True,
+        comment=f"{requested_scored} of {len(requested)} requested markets scored",
+    )
+    observability.record("analysis.attempts", float(state.get("attempts", 1)))
+    faults = quality.tool_call_faults(state.get("coverage_tasks") or [], list(requested))
+    # Split, because "accuracy" as one number says nothing about what to fix.
+    # A redundant collection is where cost leaks; an off-request one is a call
+    # that should never have been made.
+    observability.record("tools.redundant_collections", float(faults["redundant"]))
+    observability.record("tools.off_request_collections", float(faults["off_request"]))
     return {}
 
 
@@ -375,6 +403,7 @@ async def narrate_node(state: dict) -> dict:
         )
         await core.attach_narrative(state["analysis_id"], narrative)
         await core.record_progress(state["analysis_id"], None)
+        await _check_narrative(narrative, packet)
         return {"narrative": narrative}
     except (ScoringUnavailable, ScoringRejected) as exc:
         logger.exception("Analysis %s is delivered, but attaching its narrative failed", state["analysis_id"])
@@ -399,3 +428,60 @@ async def give_up_node(state: dict) -> dict:
     reason = f"Analysis incomplete for {', '.join(missing) or 'every requested market'}: {cause}."
     await _client().fail_analysis(state["analysis_id"], reason)
     return {"errors": [reason]}
+
+
+
+async def _check_narrative(narrative: str | None, packet: dict[str, Any]) -> None:
+    """What the text claims, measured against what the evidence holds.
+
+    Possible only because no number in the answer comes from a model: the
+    narrative is written from a deterministic packet, so a figure that is not
+    in the packet is not supported by anything. That check is exact and free,
+    so it runs on every analysis.
+
+    The judge is for what it cannot reach — sentences that claim something
+    without stating a figure — and is sampled, because a second model on every
+    run doubles the cost of the thing being measured.
+
+    Nothing here can fail the analysis. It is already delivered.
+    """
+    if not narrative:
+        observability.record("narrative.written", False, comment="the model returned nothing")
+        return
+
+    try:
+        unsupported = quality.unsupported_numbers(narrative, packet)
+        observability.record(
+            "narrative.unsupported_figures",
+            float(len(unsupported)),
+            comment=("none" if not unsupported else f"stated but not in the evidence: {unsupported}"),
+        )
+
+        violations = quality.language_violations(narrative)
+        observability.record(
+            "narrative.language_violations",
+            float(len(violations)),
+            comment=("none" if not violations else "; ".join(violations)),
+        )
+
+        from app.config import get_settings
+
+        import random
+
+        if random.random() > get_settings().judge_sample_rate:
+            logger.info("QUALITY narrative.judged=skipped (outside the judged sample)")
+            return
+
+        verdict = await quality.judge_support(narrative, packet)
+        if verdict is None:
+            # Already said why, in quality.judge_support. No score is recorded:
+            # an absent judgement must not be readable as a clean one.
+            return
+        claims = verdict.get("unsupported_claims") or []
+        observability.record(
+            "narrative.unsupported_claims",
+            float(len(claims)),
+            comment=("none" if not claims else "; ".join(str(c) for c in claims)[:500]),
+        )
+    except Exception:  # noqa: BLE001 — a measurement must never break what it measures
+        logger.exception("Could not check the narrative; the analysis is unaffected")

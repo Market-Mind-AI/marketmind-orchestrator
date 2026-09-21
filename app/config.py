@@ -79,6 +79,22 @@ class Settings(BaseSettings):
             f"@{self.checkpointer_db_host}:{self.checkpointer_db_port}/{self.checkpointer_db_name}"
         )
 
+    # --- The hallucination judge ---
+    #
+    # A second model, checking the sentences the deterministic check cannot
+    # reach: the ones that claim something without stating a figure. Optional
+    # on purpose — unset means that check is skipped and said so in the log,
+    # never that the analysis fails.
+    #
+    # Deliberately not the model that wrote the narrative: a model asked
+    # whether its own text is supported is not an independent reading.
+    judge_api_key: Optional[str] = None
+    judge_model: str = "gpt-5.1"
+    # Judged share of analyses. A judge on every run doubles the cost of the
+    # thing being measured, and the deterministic checks — which catch the
+    # damaging kind — already run on all of them.
+    judge_sample_rate: float = 0.2
+
     # --- Observability ---
     #
     # Every run becomes a trace: the nodes, the tools called, the tokens, the

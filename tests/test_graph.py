@@ -19,7 +19,7 @@ def core(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
             "user_prompt": "vale a pena?",
         }
     )
-    client.ensure_coverage = AsyncMock(return_value=[])
+    client.ensure_coverage = AsyncMock(return_value={"tasks": [], "search_terms": ["air fryer"]})
     client.candidates_coverage = AsyncMock(return_value={"champion_cached": False})
     client.demand_ceiling = AsyncMock(return_value=(1_500_000.0, {"mode": "reference_candidate"}))
     client.compute_mos = AsyncMock(
@@ -80,10 +80,10 @@ async def test_a_source_that_is_down_makes_the_run_go_back_and_collect(core: Asy
     )
     core.ensure_coverage = AsyncMock(
         side_effect=[
-            [],
-            [{"country": "PRT", "status": "failed", "error_message": "502"}],
-            [],
-            [],
+            {"tasks": []},
+            {"tasks": [{"country": "PRT", "status": "failed", "error_message": "502"}]},
+            {"tasks": []},
+            {"tasks": []},
         ]
     )
 
@@ -100,7 +100,7 @@ async def test_a_source_that_lacks_the_datum_ends_the_run_with_a_reason(core: As
     core.compute_mos = AsyncMock(
         return_value=[{"country": "ESP", "mos": 70.0}, {"country": "PRT", "mos": None}]
     )
-    core.ensure_coverage = AsyncMock(return_value=[{"country": "PRT", "status": "success"}])
+    core.ensure_coverage = AsyncMock(return_value={"tasks": [{"country": "PRT", "status": "success"}]})
 
     await build_graph().ainvoke({"analysis_id": "a1"})
 
@@ -233,10 +233,99 @@ async def test_a_tie_leaves_the_crown_with_the_requested_market(core: AsyncMock)
 async def test_a_cached_champion_wins_when_nothing_requested_scored(core: AsyncMock) -> None:
     core.candidates_coverage = AsyncMock(return_value=_cached("BRA", 66.37))
     core.compute_mos = AsyncMock(return_value=[{"country": "ESP", "mos": None}, {"country": "PRT", "mos": None}])
-    core.ensure_coverage = AsyncMock(return_value=[{"country": "ESP", "status": "success"}])
+    core.ensure_coverage = AsyncMock(return_value={"tasks": [{"country": "ESP", "status": "success"}]})
 
     await build_graph().ainvoke({"analysis_id": "a1"})
 
     # Nothing requested could be scored, so the run gives up rather than
     # delivering a ranking made only of a market nobody asked about.
     core.fail_analysis.assert_awaited_once()
+
+
+# --- what the run reports about itself ---
+
+
+async def test_the_search_terms_are_logged_per_country(core: AsyncMock, caplog) -> None:
+    """The one thing a model chose that nothing downstream exposes. Get the
+    native term wrong and the analysis is immaculate and about the wrong
+    words — with no symptom anywhere else."""
+    core.ensure_coverage = AsyncMock(
+        return_value={
+            "tasks": [],
+            "location": "ES",
+            "language": "es",
+            "search_terms": ["freidora de aire", "air fryer"],
+            "category_terms": ["freidora"],
+        }
+    )
+
+    with caplog.at_level("INFO"):
+        await build_graph().ainvoke({"analysis_id": "a1"})
+
+    assert "SEARCH TERMS ESP (ES, es)" in caplog.text
+    assert "freidora de aire" in caplog.text
+
+
+async def test_the_run_reports_its_own_outcome(core: AsyncMock, caplog) -> None:
+    with caplog.at_level("INFO"):
+        await build_graph().ainvoke({"analysis_id": "a1"})
+
+    assert "QUALITY analysis.complete=True" in caplog.text
+    assert "2 of 2 requested markets scored" in caplog.text
+
+
+async def test_a_redundant_collection_is_counted(core: AsyncMock, caplog) -> None:
+    """Where the cost leaks: the same country collected twice in one run."""
+    core.ensure_coverage = AsyncMock(
+        side_effect=[
+            {"tasks": [{"country": "ESP"}, {"country": "ESP"}]},  # collected twice
+            {"tasks": [{"country": "PRT"}]},
+        ]
+    )
+
+    with caplog.at_level("INFO"):
+        await build_graph().ainvoke({"analysis_id": "a1"})
+
+    assert "tools.redundant_collections=1.0" in caplog.text
+    assert "tools.off_request_collections=0.0" in caplog.text
+
+
+async def test_a_figure_the_evidence_does_not_hold_is_reported(core: AsyncMock, caplog) -> None:
+    """Checkable only because no number in the answer comes from a model."""
+    core.build_evidence = AsyncMock(return_value={"countries": [{"country": "ESP", "mos": 40.02}]})
+    core.narrate = AsyncMock(return_value="Spain scores 40 with 9,400,000 searches a month.")
+
+    with caplog.at_level("INFO"):
+        await build_graph().ainvoke({"analysis_id": "a1"})
+
+    assert "narrative.unsupported_figures=1.0" in caplog.text
+    assert "9400000" in caplog.text
+
+
+async def test_a_narrative_that_obeys_the_rules_reports_nothing(core: AsyncMock, caplog) -> None:
+    core.build_evidence = AsyncMock(return_value={"countries": [{"country": "ESP", "mos": 40.02}]})
+    core.narrate = AsyncMock(return_value="Search interest in Spain is moderate, scoring 40.")
+
+    with caplog.at_level("INFO"):
+        await build_graph().ainvoke({"analysis_id": "a1"})
+
+    assert "narrative.unsupported_figures=0.0" in caplog.text
+    assert "narrative.language_violations=0.0" in caplog.text
+
+
+async def test_with_no_judge_configured_the_run_says_so_and_carries_on(
+    core: AsyncMock, caplog, monkeypatch
+) -> None:
+    """Asked for explicitly: do not run that part, and say it is not
+    configured — rather than failing, or leaving a silent gap."""
+    monkeypatch.delenv("JUDGE_API_KEY", raising=False)
+    monkeypatch.setenv("JUDGE_SAMPLE_RATE", "1.0")
+
+    with caplog.at_level("INFO"):
+        await build_graph().ainvoke({"analysis_id": "a1"})
+
+    assert "judge is not configured" in caplog.text
+    assert "narrative.unsupported_claims" not in caplog.text, (
+        "no score at all — an absent judgement must not read as a clean one"
+    )
+    core.complete_analysis.assert_awaited_once()

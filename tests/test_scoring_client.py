@@ -82,14 +82,15 @@ async def test_coverage_answers_with_the_tasks_it_dispatched() -> None:
             200,
             json={
                 "country": "ESP",
+                "search_terms": ["freidora de aire", "air fryer"],
                 "tasks": [{"status": "failed", "source": "undata", "error_message": "502"}],
             },
         )
     )
 
-    tasks = await _client().ensure_coverage("ESP", "e1")
+    answer = await _client().ensure_coverage("ESP", "e1")
 
-    assert [t["status"] for t in tasks] == ["failed"]
+    assert [t["status"] for t in answer["tasks"]] == ["failed"]
 
 
 @respx.mock

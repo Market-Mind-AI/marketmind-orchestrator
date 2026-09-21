@@ -1,0 +1,220 @@
+"""What the run is judged on, beyond whether it finished.
+
+Latency and token spend come free from the trace. These are the three that
+need a definition before they can be a number, and the definition is the work.
+
+The hallucination check is only possible because no number in the answer comes
+from a model: the narrative is written from a deterministic evidence packet, so
+a figure that is not in the packet is not supported by anything. If the MOS ever
+came out of a model, this file could not exist.
+"""
+
+import logging
+import re
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# Phrases the narrative must not use, and why. These are the language rules the
+# method already commits to; they are rules, not judgement, so they are checked
+# here rather than sent to a model.
+_FORBIDDEN = [
+    (
+        re.compile(r"\b(proven|confirmed|actual|real)\s+demand\b", re.I),
+        "search interest is not proven demand — the sources measure people searching, not people buying",
+    ),
+    (
+        re.compile(r"\bguarantee(s|d)?\b", re.I),
+        "the score is an opportunity reading, never a guarantee",
+    ),
+]
+
+
+def numbers_in(text: str) -> list[float]:
+    """Every figure the narrative states.
+
+    Thousands separators and decimal commas both appear, and a number written
+    either way has to be recognised or the check quietly passes everything.
+    """
+    out: list[float] = []
+    for raw in re.findall(r"-?\d[\d.,]*", text or ""):
+        cleaned = raw.rstrip(".,")
+        # 1.234,56 (European) vs 1,234.56 (English): the LAST separator is the
+        # decimal one, the rest group thousands.
+        if "," in cleaned and "." in cleaned:
+            decimal = max(cleaned.rfind(","), cleaned.rfind("."))
+            cleaned = re.sub(r"[.,]", "", cleaned[:decimal]) + "." + cleaned[decimal + 1 :]
+        else:
+            # One kind of separator, so it is either the decimal point or
+            # thousands grouping. Groups of exactly three, more than once, or a
+            # single group of three after a leading part, mean grouping.
+            #
+            # Getting this wrong is not a rounding error: 1.500.000 read as
+            # nothing at all means a fabricated million-search claim passes the
+            # check silently, which is the exact failure this file exists to
+            # catch.
+            for sep in (",", "."):
+                if sep not in cleaned:
+                    continue
+                parts = cleaned.split(sep)
+                grouped = len(parts) > 2 and all(len(p) == 3 for p in parts[1:])
+                grouped = grouped or (len(parts) == 2 and len(parts[1]) == 3 and len(parts[0]) <= 3)
+                cleaned = cleaned.replace(sep, "") if grouped else cleaned.replace(sep, ".")
+        try:
+            out.append(float(cleaned))
+        except ValueError:
+            # A shape nobody anticipated. Said out loud rather than dropped: a
+            # checker that silently ignores what it cannot read approves
+            # everything it cannot read.
+            logger.warning("Could not read %r as a number while checking the narrative", raw)
+    return out
+
+
+def numbers_in_packet(packet: dict[str, Any]) -> set[float]:
+    """Every figure the evidence supports, at any depth."""
+    found: set[float] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+        elif isinstance(node, bool):
+            return
+        elif isinstance(node, (int, float)):
+            found.add(float(node))
+        elif isinstance(node, str):
+            for value in numbers_in(node):
+                found.add(value)
+
+    walk(packet)
+    return found
+
+
+def unsupported_numbers(narrative: str, packet: dict[str, Any], *, tolerance: float = 0.5) -> list[float]:
+    """Figures the narrative states that the evidence does not contain.
+
+    Rounding is allowed — a packet holding 40.0219 supports "40" — because
+    rounding is how the text is meant to read. Anything further apart is a
+    figure nobody computed.
+
+    Years and small counts are skipped: "the last 3 years" and "2026" are
+    prose, not claims about this product's data, and treating them as
+    unsupported would bury the real finding under noise.
+    """
+    supported = numbers_in_packet(packet)
+    if not supported:
+        return []
+
+    unsupported: list[float] = []
+    for value in numbers_in(narrative):
+        if abs(value) <= 12 or 1900 <= value <= 2100:
+            continue
+        if any(abs(value - ok) <= tolerance for ok in supported):
+            continue
+        # A figure stated as a percentage of something, or as thousands, is
+        # still the packet's number.
+        if any(abs(value - ok * 100) <= tolerance or abs(value * 100 - ok) <= tolerance for ok in supported):
+            continue
+        if any(abs(value - ok / 1000) <= tolerance or abs(value * 1000 - ok) <= tolerance for ok in supported):
+            continue
+        unsupported.append(value)
+    return unsupported
+
+
+def language_violations(narrative: str) -> list[str]:
+    """Rules the narrative broke. Rules, not judgement — so no model is asked."""
+    return [reason for pattern, reason in _FORBIDDEN if pattern.search(narrative or "")]
+
+
+def tool_call_faults(coverage_tasks: list[dict[str, Any]], countries: list[str]) -> dict[str, int]:
+    """Two exact, free measures of how well the run used its tools.
+
+    "Accuracy" alone is not measurable. Split, it is: a collection dispatched
+    twice for the same country in one run is redundant — that is where cost
+    leaks — and a country asked for that was never requested is a call that
+    should not have happened at all.
+    """
+    wanted = set(countries)
+    seen: dict[str, int] = {}
+    stray = 0
+    for task in coverage_tasks or []:
+        country = task.get("country")
+        if country is None:
+            continue
+        if country not in wanted:
+            stray += 1
+        seen[country] = seen.get(country, 0) + 1
+    return {
+        "redundant": sum(count - 1 for count in seen.values() if count > 1),
+        "off_request": stray,
+    }
+
+
+# --- The judge: for the sentences that carry no number ---
+
+
+class JudgeNotConfigured(RuntimeError):
+    """No judge model is configured, so nothing was judged."""
+
+
+async def judge_support(narrative: str, packet: dict[str, Any]) -> dict[str, Any] | None:
+    """Ask a second model whether the packet supports what the narrative claims.
+
+    Only for the part the deterministic check cannot reach: sentences that make
+    a claim without stating a figure. The numbers are already checked exactly,
+    and a model is a worse instrument for something that can be compared.
+
+    Returns None when no judge is configured. Not an error and not a failure —
+    the analysis is finished and correct either way, and a missing judge means
+    one signal is absent, not that anything is wrong. It is said in the log so
+    an empty score is never mistaken for a clean one.
+    """
+    from app.config import get_settings
+
+    settings = get_settings()
+    if not settings.judge_api_key:
+        logger.info(
+            "Hallucination judge is not configured (JUDGE_API_KEY unset), so the narrative was not judged. "
+            "The deterministic checks — every figure against the evidence, and the language rules — still ran."
+        )
+        return None
+
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=settings.judge_api_key)
+    prompt = (
+        "You are checking one business narrative against the evidence it was written from.\n\n"
+        "Answer ONLY about claims the evidence does not support. A claim is unsupported when the "
+        "evidence contains nothing that would establish it — not when it is merely phrased "
+        "differently, rounded, or summarised.\n\n"
+        f"EVIDENCE:\n{packet}\n\nNARRATIVE:\n{narrative}"
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "supported": {"type": "boolean"},
+            "unsupported_claims": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["supported", "unsupported_claims"],
+        "additionalProperties": False,
+    }
+
+    try:
+        response = await client.chat.completions.create(
+            model=settings.judge_model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "support", "schema": schema, "strict": True},
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — a judge that fails must never fail the analysis
+        logger.warning("The hallucination judge could not be reached, so the narrative was not judged: %s", exc)
+        return None
+
+    import json
+
+    return json.loads(response.choices[0].message.content or "{}")

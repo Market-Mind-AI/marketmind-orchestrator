@@ -11,10 +11,13 @@ explanation, it does not corrupt an answer. It is said once at startup rather
 than silently, so nobody discovers it while trying to explain a bad run.
 """
 
+import logging
 from functools import lru_cache
 from typing import Any
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -42,3 +45,32 @@ def callbacks() -> list[Any]:
 
 def tracing_enabled() -> bool:
     return _handler() is not None
+
+
+def record(name: str, value: float | str | bool, *, comment: str | None = None) -> None:
+    """Attach one measure to the run's trace, and say it in the log.
+
+    Both, because they answer different questions. The trace is where a run is
+    compared with the ones before it; the log is where someone reading a single
+    failing run finds out what was wrong with it.
+
+    Never raises. A measurement that breaks the thing it measures is worse than
+    no measurement.
+    """
+    line = f"{name}={value}" + (f" ({comment})" if comment else "")
+    logger.info("QUALITY %s", line)
+
+    handler = _handler()
+    if handler is None:
+        return
+    try:
+        from langfuse import get_client
+
+        get_client().score_current_trace(
+            name=name,
+            value=1.0 if value is True else 0.0 if value is False else value,
+            data_type="BOOLEAN" if isinstance(value, bool) else None,
+            comment=comment,
+        )
+    except Exception:  # noqa: BLE001 — never let a score break a run
+        logger.debug("Could not attach the score %s to the trace", name, exc_info=True)

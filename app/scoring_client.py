@@ -151,20 +151,24 @@ class ScoringClient:
             json={"entity_key": entity_key, "countries": countries, "with_candidates": with_candidates},
         )
 
-    async def ensure_coverage(self, country_iso3: str, entity_key: str | None) -> list[dict[str, Any]]:
+    async def ensure_coverage(self, country_iso3: str, entity_key: str | None) -> dict[str, Any]:
         """Collect what this country is missing, and report what was tried.
 
         The tasks are the answer, not the data. A FAILED task is a source that
         is down and worth insisting on; a task that finished without failing and
         still left the indicator missing is a source that does not have that
         datum. Insisting on the second never ends.
+
+        The vocabulary the country was searched for comes back with them. It is
+        the one part of the pipeline a model wrote, and nothing downstream
+        reveals it: a wrong native term produces a perfectly formed analysis of
+        the wrong words.
         """
-        body = await self._call(
+        return await self._call(
             "POST",
             "/internal/coverage/ensure",
             json={"country_iso3": country_iso3, "entity_key": entity_key},
         )
-        return body.get("tasks", [])
 
     async def candidates_coverage(
         self, entity_key: str, requested_countries: list[str], period_key: str
