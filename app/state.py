@@ -35,6 +35,11 @@ class OrchestratorState(TypedDict, total=False):
     # answer.
     period_key: str
 
+    # When the buyer's wait began. Set once and never refreshed on resume: the
+    # latency that matters is the one that was waited, and a run that died and
+    # came back was waited through, restart included.
+    started_at: str
+
     # How long to keep insisting on a source that is down before declaring the
     # analysis failed. Absent means the run has not started insisting yet.
     deadline_at: str | None

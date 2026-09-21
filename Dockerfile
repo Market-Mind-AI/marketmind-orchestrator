@@ -18,8 +18,9 @@ EXPOSE 8000
 # analysis instead of starting it over — but LangGraph creates those tables
 # itself on startup, so there is nothing to migrate here.
 #
-# build_graph() runs at import in app/main.py, but it only wires nodes together —
-# get_llm() is called inside a node at request time, so the container starts
-# cleanly with no API key configured and only fails the individual request that
-# needs one.
+# build_graph() runs at import in app/main.py, but it only wires nodes together.
+# Every model call this service causes is made by the scoring service behind a
+# tool call, so the container starts cleanly with no model credential of its own;
+# the only one it reads is the optional judge key, and an absent judge skips the
+# judged check rather than failing the run.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

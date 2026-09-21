@@ -151,3 +151,47 @@ async def test_a_champion_can_be_recorded_as_nothing_scorable() -> None:
     body = json.loads(route.calls.last.request.content)
     assert body["country"] is None
     assert body["period_key"] == "2026-09"
+
+
+@respx.mock
+async def test_what_a_call_spent_on_models_is_added_to_the_run() -> None:
+    """The agent decides; the scoring service makes the model calls those
+    decisions cause. Without this the only component able to say what a run cost
+    would be the one component that cannot see it."""
+    from app import spend
+
+    respx.post(f"{_BASE}/internal/analyses/r1/enrich-terms").mock(
+        return_value=httpx.Response(
+            200,
+            json={"ok": True},
+            headers={"X-LLM-Input-Tokens": "1200", "X-LLM-Output-Tokens": "300", "X-LLM-Calls": "2"},
+        )
+    )
+
+    with spend.tally() as spent:
+        await _client()._call("POST", "/internal/analyses/r1/enrich-terms")
+
+    assert spent.input_tokens == 1200
+    assert spent.output_tokens == 300
+    assert spent.calls == 2
+
+
+@respx.mock
+async def test_a_call_that_failed_still_reports_what_it_burned() -> None:
+    """A run that retries three times has to report all three. Tokens spent
+    before a failure are spent."""
+    from app import spend
+
+    respx.post(f"{_BASE}/internal/analyses/r1/enrich-terms").mock(
+        return_value=httpx.Response(
+            500,
+            json={"detail": "upstream died"},
+            headers={"X-LLM-Input-Tokens": "900", "X-LLM-Output-Tokens": "0", "X-LLM-Calls": "1"},
+        )
+    )
+
+    with spend.tally() as spent:
+        with pytest.raises(ScoringUnavailable):
+            await _client()._call("POST", "/internal/analyses/r1/enrich-terms")
+
+    assert spent.total_tokens == 900

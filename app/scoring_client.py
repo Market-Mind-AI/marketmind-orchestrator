@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 
+from app import spend
 from app.config import get_settings
 
 # The scoring service sits next to this one, but some of these calls trigger
@@ -61,6 +62,11 @@ class ScoringClient:
                 response = await client.request(method, url, json=json, headers=self._headers())
         except httpx.HTTPError as exc:
             raise ScoringUnavailable(f"{method} {path} failed: {exc}") from exc
+
+        # Before the status check: a call that failed still burned the tokens it
+        # burned before failing, and a run that retries three times has to
+        # report all three.
+        spend.add_response(response.headers)
 
         if 400 <= response.status_code < 500:
             raise ScoringRejected(response.status_code, _detail(response))

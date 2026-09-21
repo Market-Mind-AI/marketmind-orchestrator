@@ -15,7 +15,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from app import observability, quality
+from app import metrics, observability, quality
 from app.scoring_client import ScoringClient, ScoringRejected, ScoringUnavailable
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,7 @@ async def start_node(state: dict) -> dict:
         "user_prompt": stored.get("user_prompt"),
         # Decided here and only here, then carried in the checkpoint.
         "period_key": state.get("period_key") or _period_key(),
+        "started_at": state.get("started_at") or datetime.now(UTC).isoformat(),
         "deadline_at": state.get("deadline_at") or (datetime.now(UTC) + INSIST_FOR).isoformat(),
         "attempts": state.get("attempts", 0),
     }
@@ -364,19 +365,13 @@ async def deliver_node(state: dict) -> dict:
         state["analysis_id"], result=results, breakdown=state.get("breakdown")
     )
 
-    requested_scored = len([r for r in results if r.get("mos") is not None and r.get("country") in requested])
-    observability.record(
-        "analysis.complete",
-        True,
-        comment=f"{requested_scored} of {len(requested)} requested markets scored",
-    )
+    # Measured here, where the buyer actually has the answer — not after the
+    # narrative, which is attached a moment later and is not what was waited for.
+    metrics.task_completion_rate(results, requested)
+    metrics.response_latency_seconds(state.get("started_at"))
+    metrics.token_consumption()
+    metrics.tool_invocation_accuracy(state.get("coverage_tasks") or [], list(requested))
     observability.record("analysis.attempts", float(state.get("attempts", 1)))
-    faults = quality.tool_call_faults(state.get("coverage_tasks") or [], list(requested))
-    # Split, because "accuracy" as one number says nothing about what to fix.
-    # A redundant collection is where cost leaks; an off-request one is a call
-    # that should never have been made.
-    observability.record("tools.redundant_collections", float(faults["redundant"]))
-    observability.record("tools.off_request_collections", float(faults["off_request"]))
     return {}
 
 
@@ -427,6 +422,16 @@ async def give_up_node(state: dict) -> dict:
 
     reason = f"Analysis incomplete for {', '.join(missing) or 'every requested market'}: {cause}."
     await _client().fail_analysis(state["analysis_id"], reason)
+
+    # Reported for a failed run too. A completion rate measured only on the runs
+    # that completed is always 1.0, and a latency measured only on those hides
+    # exactly the runs that took longest.
+    requested = set(state["countries"])
+    metrics.task_completion_rate(state.get("mos_results") or [], requested)
+    metrics.response_latency_seconds(state.get("started_at"), what="given up")
+    metrics.token_consumption()
+    metrics.tool_invocation_accuracy(state.get("coverage_tasks") or [], list(requested))
+    observability.record("analysis.attempts", float(state.get("attempts", 1)))
     return {"errors": [reason]}
 
 
@@ -451,11 +456,7 @@ async def _check_narrative(narrative: str | None, packet: dict[str, Any]) -> Non
 
     try:
         unsupported = quality.unsupported_numbers(narrative, packet)
-        observability.record(
-            "narrative.unsupported_figures",
-            float(len(unsupported)),
-            comment=("none" if not unsupported else f"stated but not in the evidence: {unsupported}"),
-        )
+        metrics.hallucination_rate(narrative, packet, unsupported)
 
         violations = quality.language_violations(narrative)
         observability.record(

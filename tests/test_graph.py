@@ -266,12 +266,19 @@ async def test_the_search_terms_are_logged_per_country(core: AsyncMock, caplog) 
     assert "freidora de aire" in caplog.text
 
 
-async def test_the_run_reports_its_own_outcome(core: AsyncMock, caplog) -> None:
+async def test_the_run_reports_the_five_measures(core: AsyncMock, caplog) -> None:
+    """Every run says whether it did the job, how long the buyer waited, what it
+    cost, how much of its work was worth doing, and how much of its text the
+    evidence holds up. In the log, so one bad run can be read without a tracing
+    backend, and on the trace, so many runs can be compared with one."""
     with caplog.at_level("INFO"):
         await build_graph().ainvoke({"analysis_id": "a1"})
 
-    assert "QUALITY analysis.complete=True" in caplog.text
-    assert "2 of 2 requested markets scored" in caplog.text
+    assert "QUALITY task_completion_rate=1.0 (2 of 2 requested markets scored)" in caplog.text
+    assert "QUALITY response_latency_seconds=" in caplog.text
+    assert "QUALITY token_consumption=" in caplog.text
+    assert "QUALITY tool_invocation_accuracy=1.0" in caplog.text
+    assert "QUALITY hallucination_rate=" in caplog.text
 
 
 async def test_a_redundant_collection_is_counted(core: AsyncMock, caplog) -> None:
@@ -286,8 +293,9 @@ async def test_a_redundant_collection_is_counted(core: AsyncMock, caplog) -> Non
     with caplog.at_level("INFO"):
         await build_graph().ainvoke({"analysis_id": "a1"})
 
-    assert "tools.redundant_collections=1.0" in caplog.text
-    assert "tools.off_request_collections=0.0" in caplog.text
+    # 3 collection calls, 1 of them the same country twice.
+    assert "QUALITY tool_invocation_accuracy=0.6667" in caplog.text
+    assert "1 redundant, 0 off-request" in caplog.text
 
 
 async def test_a_figure_the_evidence_does_not_hold_is_reported(core: AsyncMock, caplog) -> None:
@@ -298,7 +306,8 @@ async def test_a_figure_the_evidence_does_not_hold_is_reported(core: AsyncMock, 
     with caplog.at_level("INFO"):
         await build_graph().ainvoke({"analysis_id": "a1"})
 
-    assert "narrative.unsupported_figures=1.0" in caplog.text
+    # One figure stated that the evidence does not hold, out of two stated.
+    assert "QUALITY hallucination_rate=0.5" in caplog.text
     assert "9400000" in caplog.text
 
 
@@ -309,7 +318,7 @@ async def test_a_narrative_that_obeys_the_rules_reports_nothing(core: AsyncMock,
     with caplog.at_level("INFO"):
         await build_graph().ainvoke({"analysis_id": "a1"})
 
-    assert "narrative.unsupported_figures=0.0" in caplog.text
+    assert "QUALITY hallucination_rate=0.0" in caplog.text
     assert "narrative.language_violations=0.0" in caplog.text
 
 
@@ -329,3 +338,23 @@ async def test_with_no_judge_configured_the_run_says_so_and_carries_on(
         "no score at all — an absent judgement must not read as a clean one"
     )
     core.complete_analysis.assert_awaited_once()
+
+
+async def test_a_run_that_gave_up_reports_the_same_five(core: AsyncMock, caplog) -> None:
+    """Measured on the runs that failed too. A completion rate read only off the
+    runs that completed is always 1.0, and a latency read only off those hides
+    exactly the runs that took longest — which are the ones worth seeing."""
+    core.compute_mos = AsyncMock(
+        return_value=[{"country": "ESP", "mos": 70.0}, {"country": "PRT", "mos": None}]
+    )
+    core.ensure_coverage = AsyncMock(return_value={"tasks": [{"country": "PRT", "status": "success"}]})
+
+    with caplog.at_level("INFO"):
+        await build_graph().ainvoke({"analysis_id": "a1"})
+
+    core.fail_analysis.assert_awaited_once()
+    assert "QUALITY task_completion_rate=0.5 (1 of 2 requested markets scored)" in caplog.text
+    assert "QUALITY response_latency_seconds=" in caplog.text
+    assert "run start -> given up" in caplog.text
+    assert "QUALITY token_consumption=" in caplog.text
+    assert "QUALITY tool_invocation_accuracy=" in caplog.text

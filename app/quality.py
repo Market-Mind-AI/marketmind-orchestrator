@@ -215,6 +215,17 @@ async def judge_support(narrative: str, packet: dict[str, Any]) -> dict[str, Any
         logger.warning("The hallucination judge could not be reached, so the narrative was not judged: %s", exc)
         return None
 
+    # The judge is a model call the run made, so it belongs in the run's token
+    # figure. Measuring a thing is not free, and a cost report that leaves out
+    # the measuring understates what the run cost.
+    from app import spend
+
+    judged = getattr(response, "usage", None)
+    spend.add_call(
+        getattr(judged, "prompt_tokens", None),
+        getattr(judged, "completion_tokens", None),
+    )
+
     import json
 
     return json.loads(response.choices[0].message.content or "{}")
