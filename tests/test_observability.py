@@ -70,6 +70,29 @@ def test_a_run_without_tracing_still_runs(monkeypatch: pytest.MonkeyPatch) -> No
         observability.record("task_completion_rate", 1.0)
 
 
+def test_a_tracing_failure_does_not_fail_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the setup -- opening the trace -- is guarded. A Langfuse client that
+    raises from start_as_current_observation itself must not take the analysis
+    down with it: the run's body still has to execute."""
+    from langfuse import Langfuse
+
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    monkeypatch.setenv("LANGFUSE_HOST", "http://localhost:3000")
+
+    def broken(self, **_: object) -> None:
+        raise RuntimeError("langfuse exploded")
+
+    monkeypatch.setattr(Langfuse, "start_as_current_observation", broken)
+
+    ran = False
+    with observability.run("a8c5d38b-db60-413c-b8f3-086a0befb83a"):
+        ran = True
+        observability.record("task_completion_rate", 1.0)
+
+    assert ran is True
+
+
 @pytest.fixture
 def clean_logging():
     """setup_logging binds the stdout it sees and then refuses to add a second

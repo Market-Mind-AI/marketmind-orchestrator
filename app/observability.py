@@ -13,7 +13,7 @@ than silently, so nobody discovers it while trying to explain a bad run.
 
 import logging
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from functools import lru_cache
 from typing import Any
 
@@ -68,11 +68,17 @@ def run(analysis_id: str) -> Iterator[None]:
 
     from langfuse import Langfuse, get_client
 
-    with get_client().start_as_current_observation(
-        name="analysis",
-        trace_context={"trace_id": Langfuse.create_trace_id(seed=analysis_id)},
-        metadata={"analysis_id": analysis_id},
-    ):
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(
+                get_client().start_as_current_observation(
+                    name="analysis",
+                    trace_context={"trace_id": Langfuse.create_trace_id(seed=analysis_id)},
+                    metadata={"analysis_id": analysis_id},
+                )
+            )
+        except Exception:  # noqa: BLE001 — tracing never fails an analysis
+            logger.debug("Could not open the trace for analysis %s", analysis_id, exc_info=True)
         yield
 
 
