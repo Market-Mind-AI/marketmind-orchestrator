@@ -197,3 +197,46 @@ async def test_two_runs_at_once_do_not_share_a_tally() -> None:
 
     assert first == 300
     assert second == 14
+
+
+def test_the_two_demand_collections_of_one_country_are_not_a_repeat(caplog) -> None:
+    """Measured on a real run and it read 0.5 with nothing wrong. Every country
+    legitimately gets two dispatches — the search volume and the related
+    keywords — and keying redundancy on the country alone counted the second as
+    a repeat of the first. A third of every analysis reported as waste."""
+    tasks = [
+        {"country": "BRA", "indicator_code": "search_volume", "period_key": "2026-09"},
+        {"country": "BRA", "indicator_code": "keywords_for_keywords", "period_key": "2026-09"},
+        {"country": "ESP", "indicator_code": "search_volume", "period_key": "2026-09"},
+        {"country": "ESP", "indicator_code": "keywords_for_keywords", "period_key": "2026-09"},
+    ]
+    with caplog.at_level(logging.INFO):
+        metrics.tool_invocation_accuracy(tasks, ["BRA", "ESP"])
+
+    line = _lines(caplog)
+    assert "tool_invocation_accuracy=1.0" in line
+    assert "0 redundant" in line
+
+
+def test_the_very_same_collection_twice_is_still_a_repeat(caplog) -> None:
+    """The allowance is for different indicators, not for the same one asked
+    twice — which is exactly where cost leaks."""
+    tasks = [
+        {"country": "BRA", "indicator_code": "search_volume", "period_key": "2026-09"},
+        {"country": "BRA", "indicator_code": "search_volume", "period_key": "2026-09"},
+    ]
+    with caplog.at_level(logging.INFO):
+        metrics.tool_invocation_accuracy(tasks, ["BRA"])
+
+    assert "1 redundant" in _lines(caplog)
+
+
+def test_the_same_indicator_in_a_different_period_is_a_different_call(caplog) -> None:
+    tasks = [
+        {"country": "BRA", "indicator_code": "search_volume", "period_key": "2026-08"},
+        {"country": "BRA", "indicator_code": "search_volume", "period_key": "2026-09"},
+    ]
+    with caplog.at_level(logging.INFO):
+        metrics.tool_invocation_accuracy(tasks, ["BRA"])
+
+    assert "0 redundant" in _lines(caplog)

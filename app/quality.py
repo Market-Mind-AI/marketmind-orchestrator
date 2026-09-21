@@ -156,13 +156,19 @@ def language_violations(narrative: str) -> list[str]:
 def tool_call_faults(coverage_tasks: list[dict[str, Any]], countries: list[str]) -> dict[str, int]:
     """Two exact, free measures of how well the run used its tools.
 
-    "Accuracy" alone is not measurable. Split, it is: a collection dispatched
-    twice for the same country in one run is redundant — that is where cost
-    leaks — and a country asked for that was never requested is a call that
-    should not have happened at all.
+    "Accuracy" alone is not measurable. Split, it is: the SAME collection
+    dispatched twice in one run is redundant — that is where cost leaks — and a
+    country nobody asked about is a call that should not have happened at all.
+
+    What counts as "the same collection" is the whole of it: the country, the
+    indicator and the period. Keying on the country alone was wrong and wrong in
+    one direction — every country legitimately gets two dispatches, one for
+    search volume and one for the related keywords, and counting the second as a
+    repeat of the first reported a third of every analysis as waste. An analysis
+    of three markets came back at 0.5 with nothing whatsoever wrong with it.
     """
     wanted = set(countries)
-    seen: dict[str, int] = {}
+    seen: dict[tuple[str, str, str], int] = {}
     stray = 0
     for task in coverage_tasks or []:
         country = task.get("country")
@@ -170,7 +176,8 @@ def tool_call_faults(coverage_tasks: list[dict[str, Any]], countries: list[str])
             continue
         if country not in wanted:
             stray += 1
-        seen[country] = seen.get(country, 0) + 1
+        key = (country, str(task.get("indicator_code") or ""), str(task.get("period_key") or ""))
+        seen[key] = seen.get(key, 0) + 1
     return {
         "redundant": sum(count - 1 for count in seen.values() if count > 1),
         "off_request": stray,
