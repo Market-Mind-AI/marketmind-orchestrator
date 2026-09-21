@@ -13,8 +13,10 @@ RUN poetry install --no-interaction --no-ansi
 
 EXPOSE 8000
 
-# No migration step, unlike the collection services: this one owns no database.
-# It holds the LangGraph pipeline and calls the other services over HTTP.
+# No migration step, unlike the collection services. It does own a database —
+# the checkpointer records where each run got to, so a restart resumes an
+# analysis instead of starting it over — but LangGraph creates those tables
+# itself on startup, so there is nothing to migrate here.
 #
 # build_graph() runs at import in app/main.py, but it only wires nodes together —
 # get_llm() is called inside a node at request time, so the container starts
