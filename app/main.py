@@ -13,6 +13,12 @@ from app.graph import build_graph, set_graph
 from app.observability import callbacks, tracing_enabled
 from app.public import router as public_router
 
+from app.logging_setup import setup_logging
+
+# Before anything else logs. Without it uvicorn configures only its own loggers
+# and every line this codebase writes is dropped.
+setup_logging()
+
 logger = logging.getLogger(__name__)
 settings = get_settings()
 

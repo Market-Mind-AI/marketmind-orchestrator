@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     # whichever ingress rule owns "/". Routing is unaffected; only the URLs the
     # docs page generates.
     root_path: str = ""
+    log_level: str = "INFO"
 
     worldbank_api_url: str = "http://marketmind-worldbank:8000"
     oecd_api_url: str = "http://marketmind-oecd:8000"
