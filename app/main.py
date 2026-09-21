@@ -12,7 +12,7 @@ from app.checkpointer import open_checkpointer
 from app.config import get_settings
 from app.graph import build_graph, set_graph
 from app.observability import callbacks, tracing_enabled
-from app.public import resume_orphans, router as public_router
+from app.public import router as public_router, watch_for_orphans
 
 from app.logging_setup import setup_logging
 
@@ -34,16 +34,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # the request that asked for it and cannot read app.state.
         set_graph(app.state.graph)
         logger.info("Checkpointer: %s", settings.checkpointer)
-        # Before serving: pick up what the previous process was running. It is a
-        # task, not an await — a slow resume must not hold the port closed, and
-        # the runs are background work either way.
-        asyncio.create_task(resume_orphans())
+        # Keep picking up analyses nobody is running: once now, then on a timer.
+        # A task, not an await — a slow first pass must not hold the port closed,
+        # and the runs are background work either way.
+        app.state.orphan_watch = asyncio.create_task(watch_for_orphans())
 
         if not tracing_enabled():
             # Said once, at startup. Discovering it while trying to explain a
             # bad run is discovering it too late.
             logger.warning("Langfuse is not configured; runs will not be traced.")
         yield
+        app.state.orphan_watch.cancel()
 
 
 app = FastAPI(title="MarketMind Orchestrator", root_path=settings.root_path, lifespan=lifespan)

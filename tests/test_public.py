@@ -291,3 +291,38 @@ async def test_the_claim_is_released_when_the_run_ends(scoring: AsyncMock) -> No
         await asyncio.sleep(0.05)
 
     assert scoring.claim_analysis.await_count == before, "nothing renews after the run is over"
+
+
+async def test_the_orphan_check_keeps_running_and_is_not_a_one_shot(scoring: AsyncMock) -> None:
+    """Measured, not reasoned. A pod killed mid-analysis is replaced in about
+    fifteen seconds, and the claim it held is good for two minutes — so the
+    replacement starts, finds nothing orphaned, and if it never asks again the
+    orphan waits for the fifteen-minute sweep. Which is the wait this was built
+    to remove."""
+    import asyncio
+
+    scoring.orphaned_analyses = AsyncMock(return_value=[])
+
+    with patch.object(public, "_ORPHAN_CHECK_SECONDS", 0.01):
+        watch = asyncio.create_task(public.watch_for_orphans())
+        await asyncio.sleep(0.06)
+        watch.cancel()
+
+    assert scoring.orphaned_analyses.await_count >= 3, "it has to keep asking"
+
+
+async def test_the_watch_survives_a_pass_that_blows_up(scoring: AsyncMock) -> None:
+    """It has to outlive any single failure: a watch that dies on one bad pass
+    leaves every later orphan to the sweep, silently."""
+    import asyncio
+
+    scoring.orphaned_analyses = AsyncMock(side_effect=[RuntimeError("boom"), [], []])
+
+    with patch.object(public, "_ORPHAN_CHECK_SECONDS", 0.01):
+        watch = asyncio.create_task(public.watch_for_orphans())
+        await asyncio.sleep(0.06)
+        alive = not watch.done()
+        watch.cancel()
+
+    assert alive
+    assert scoring.orphaned_analyses.await_count >= 3

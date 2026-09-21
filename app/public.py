@@ -146,21 +146,44 @@ def runner_id() -> str:
     return os.getenv("HOSTNAME") or socket.gethostname()
 
 
+# How often to look for analyses nobody is running. Asking once at startup is
+# not enough and the reason is worth stating, because it was measured rather
+# than reasoned: a pod killed mid-analysis is replaced in about fifteen seconds,
+# and the claim it held is good for two minutes. So the replacement starts,
+# finds nothing orphaned — the dead pod's claim has not expired yet — and never
+# asks again. The orphan then waits for the fifteen-minute sweep, which is
+# exactly the wait this was built to remove.
+#
+# Slightly longer than the claim's own staleness window, so a claim that is
+# about to expire is not chased before it has.
+_ORPHAN_CHECK_SECONDS = 150
+
+
+async def watch_for_orphans() -> None:
+    """Keep picking up analyses that nobody is running, for as long as this
+    process lives. Never raises: it must outlive every individual failure."""
+    while True:
+        try:
+            await resume_orphans()
+        except Exception:  # noqa: BLE001 — the watch must survive anything a single pass hits
+            logger.exception("The orphan check failed; trying again next time")
+        await asyncio.sleep(_ORPHAN_CHECK_SECONDS)
+
+
 async def resume_orphans() -> int:
-    """Pick up the analyses that a restart left behind, at startup.
+    """Pick up the analyses that are running with nobody running them.
 
-    This process knows it just started. What it cannot know is which analyses
-    its predecessor was running — so it asks, claims what nobody live holds, and
-    runs those. Before this, an orphan waited fifteen minutes for the scoring
-    service's sweep to notice, with the buyer watching a screen that says "in
-    progress" and nothing progressing.
+    This is one pass. It runs at startup — where it catches what a predecessor
+    that died long enough ago left behind — and then on a timer, which is what
+    catches the common case: the pod is replaced in seconds and the claim it
+    held is still good for another two minutes.
 
-    Claiming is what makes it safe to do this with more than one replica: an
-    analysis another agent is actively running is not orphaned, and the claim it
-    holds is refreshed on every progress report.
+    Claiming is what makes it safe with more than one replica: an analysis
+    another agent is actively running is not orphaned, and the claim it holds is
+    renewed on a clock for as long as the run lasts.
 
-    Never raises. A scoring service that is not up yet means this start resumes
-    nothing, and the sweep remains what it always was — the net under this.
+    Never raises. A scoring service that is not up yet resumes nothing, and the
+    sweep remains what it always was — the net under this.
     """
     try:
         orphans = await _client().orphaned_analyses()
