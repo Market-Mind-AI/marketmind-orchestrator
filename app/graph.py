@@ -2,28 +2,68 @@ from typing import Any
 
 from langgraph.graph import END, StateGraph
 
-from app.nodes import enrichment_node, extraction_node, report_node, scoring_node
+from app.nodes import (
+    after_scoring,
+    champion_node,
+    collect_node,
+    deliver_node,
+    enrich_node,
+    evidence_node,
+    give_up_node,
+    measure_node,
+    narrate_node,
+    ruler_node,
+    score_node,
+    start_node,
+)
 from app.state import OrchestratorState
 
 
 def build_graph(checkpointer: Any | None = None):  # noqa: ANN201
-    """Compile the pipeline.
+    """The analysis, in the order the scoring service's own loop ran it.
+
+    Linear except for one branch, and that branch is the analysis's real
+    decision: a run that scored every requested market goes on to deliver, and
+    one that did not either goes back to collect or ends with a reason. Nothing
+    partial is delivered -- a country missing from a ranking is not a smaller
+    answer, it is a different one.
 
     Pass a checkpointer and every super-step is recorded under the run's
-    thread_id, so re-invoking with that id resumes rather than restarting.
-    Without one the graph still runs, and a restart loses the run -- which is
-    why the application never builds it that way on purpose.
+    thread_id, so re-invoking resumes rather than restarting.
     """
     workflow = StateGraph(OrchestratorState)
-    workflow.add_node("extract", extraction_node)
-    workflow.add_node("enrich", enrichment_node)
-    workflow.add_node("score", scoring_node)
-    workflow.add_node("report_generation", report_node)
+    workflow.add_node("start", start_node)
+    workflow.add_node("enrich", enrich_node)
+    workflow.add_node("collect", collect_node)
+    workflow.add_node("ruler", ruler_node)
+    workflow.add_node("measure", measure_node)
+    workflow.add_node("score", score_node)
+    workflow.add_node("champion", champion_node)
+    workflow.add_node("evidence", evidence_node)
+    workflow.add_node("deliver", deliver_node)
+    workflow.add_node("narrate", narrate_node)
+    workflow.add_node("give_up", give_up_node)
 
-    workflow.set_entry_point("extract")
-    workflow.add_edge("extract", "enrich")
-    workflow.add_edge("enrich", "score")
-    workflow.add_edge("score", "report_generation")
-    workflow.add_edge("report_generation", END)
+    workflow.set_entry_point("start")
+    workflow.add_edge("start", "enrich")
+    workflow.add_edge("enrich", "collect")
+    workflow.add_edge("collect", "ruler")
+    workflow.add_edge("ruler", "measure")
+    workflow.add_edge("measure", "score")
+
+    # Insisting goes back to collection, not to measurement: the country is
+    # short of data, and measuring the same absence again produces the same
+    # absence.
+    workflow.add_conditional_edges(
+        "score",
+        after_scoring,
+        {"complete": "champion", "insist": "collect", "give_up": "give_up"},
+    )
+
+    workflow.add_edge("champion", "evidence")
+    workflow.add_edge("evidence", "deliver")
+    workflow.add_edge("deliver", "narrate")
+    workflow.add_edge("narrate", END)
+    workflow.add_edge("give_up", END)
 
     return workflow.compile(checkpointer=checkpointer)
