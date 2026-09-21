@@ -1,0 +1,48 @@
+# The orchestrator and the database its checkpointer writes to.
+#
+# Its own database, like every other service here. The checkpointer records
+# where each run got to, and that state is the orchestrator's — putting its
+# tables inside the scoring service's database would mean the two could only
+# ever be separated again by moving live rows.
+services:
+  marketmind-orchestrator-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: marketmind-orchestrator-api
+    ports:
+      - "${APP_PORT:-8081}:8000"
+    env_file:
+      - .env
+    environment:
+      CHECKPOINTER_DB_HOST: postgres
+      CHECKPOINTER_DB_PORT: "5432"
+    extra_hosts:
+      # Reaches the other services on the ports they publish on the host.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: marketmind-orchestrator-postgres
+    environment:
+      POSTGRES_DB: ${CHECKPOINTER_DB_NAME:-marketmind_orchestrator}
+      POSTGRES_USER: ${CHECKPOINTER_DB_USER:-marketmind}
+      POSTGRES_PASSWORD: ${CHECKPOINTER_DB_PASSWORD:-admin}
+    ports:
+      # 5437: the sixth, after core (5436) and the four collectors (5432-5435).
+      - "${DATABASE_PORT_HOST:-5437}:5432"
+    volumes:
+      - orchestrator_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CHECKPOINTER_DB_USER:-marketmind}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  orchestrator_postgres_data:
