@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import socket
 import uuid
+from functools import lru_cache
 from typing import Any
 
 import httpx
@@ -112,6 +115,12 @@ async def analyze(payload: dict[str, Any]) -> dict[str, Any]:
         raise _as_http_error(exc) from exc
 
     request_id = str(registered["request_id"])
+    # Claimed before it starts, so a restart elsewhere does not pick it up while
+    # this process is working on it.
+    try:
+        await core.claim_analysis(request_id, runner=runner_id())
+    except (ScoringUnavailable, ScoringRejected) as exc:
+        logger.warning("Analysis %s could not be claimed; running it anyway: %s", request_id, exc)
     _start(request_id)
     return {"request_id": request_id, "status": registered["status"]}
 
@@ -127,6 +136,53 @@ def _start(analysis_id: str) -> None:
     task = asyncio.create_task(_run(analysis_id))
     _in_flight.add(task)
     task.add_done_callback(_in_flight.discard)
+
+
+@lru_cache(maxsize=1)
+def runner_id() -> str:
+    """Who this process is, for claiming an analysis. The pod name in the
+    cluster; the hostname anywhere else. It only has to be different from the
+    other runners, and stable for as long as this process lives."""
+    return os.getenv("HOSTNAME") or socket.gethostname()
+
+
+async def resume_orphans() -> int:
+    """Pick up the analyses that a restart left behind, at startup.
+
+    This process knows it just started. What it cannot know is which analyses
+    its predecessor was running — so it asks, claims what nobody live holds, and
+    runs those. Before this, an orphan waited fifteen minutes for the scoring
+    service's sweep to notice, with the buyer watching a screen that says "in
+    progress" and nothing progressing.
+
+    Claiming is what makes it safe to do this with more than one replica: an
+    analysis another agent is actively running is not orphaned, and the claim it
+    holds is refreshed on every progress report.
+
+    Never raises. A scoring service that is not up yet means this start resumes
+    nothing, and the sweep remains what it always was — the net under this.
+    """
+    try:
+        orphans = await _client().orphaned_analyses()
+    except (ScoringUnavailable, ScoringRejected) as exc:
+        logger.warning("Could not ask which analyses were orphaned, so none were resumed: %s", exc)
+        return 0
+
+    resumed = 0
+    for analysis_id in orphans:
+        try:
+            if not await _client().claim_analysis(analysis_id, runner=runner_id()):
+                continue  # someone live has it
+        except (ScoringUnavailable, ScoringRejected) as exc:
+            logger.warning("Could not claim analysis %s, leaving it to the sweep: %s", analysis_id, exc)
+            continue
+        logger.info("Resuming analysis %s, orphaned by a restart", analysis_id)
+        _start(analysis_id)
+        resumed += 1
+
+    if orphans:
+        logger.info("Startup: %s of %s orphaned analyses resumed here", resumed, len(orphans))
+    return resumed
 
 
 async def _run(analysis_id: str) -> None:

@@ -184,3 +184,63 @@ async def test_a_run_in_flight_is_held_onto(scoring: AsyncMock) -> None:
         await asyncio.sleep(0)
 
     assert public._in_flight == set()  # and let go when it finishes
+
+
+async def test_orphans_left_by_a_restart_are_resumed_immediately(scoring: AsyncMock) -> None:
+    """The whole point. This process knows it just started; what it cannot know
+    is which analyses its predecessor was running — so it asks. Before this, an
+    orphan waited fifteen minutes for the scoring service's sweep, with the
+    buyer watching a screen that says "in progress" and nothing progressing."""
+    scoring.orphaned_analyses = AsyncMock(return_value=["a1", "a2"])
+    scoring.claim_analysis = AsyncMock(return_value=True)
+    started: list[str] = []
+
+    with patch.object(public, "_start", started.append):
+        resumed = await public.resume_orphans()
+
+    assert resumed == 2
+    assert started == ["a1", "a2"]
+
+
+async def test_an_analysis_another_agent_is_running_is_left_alone(scoring: AsyncMock) -> None:
+    """This is what makes a second replica safe. Without the claim, a pod coming
+    up would take over what a live pod is working on and run it twice."""
+    scoring.orphaned_analyses = AsyncMock(return_value=["mine", "theirs"])
+    scoring.claim_analysis = AsyncMock(side_effect=[True, False])
+    started: list[str] = []
+
+    with patch.object(public, "_start", started.append):
+        resumed = await public.resume_orphans()
+
+    assert resumed == 1
+    assert started == ["mine"]
+
+
+async def test_a_scoring_service_that_is_not_up_yet_resumes_nothing_and_does_not_crash(
+    scoring: AsyncMock,
+) -> None:
+    """Startup order is not guaranteed. A resume that raises here takes the
+    whole service down, and the sweep is still there as the net underneath."""
+    scoring.orphaned_analyses = AsyncMock(side_effect=ScoringUnavailable("not up"))
+
+    assert await public.resume_orphans() == 0
+
+
+async def test_a_new_analysis_is_claimed_before_it_runs(scoring: AsyncMock, started: list[str]) -> None:
+    """Otherwise a pod restarting elsewhere sees it unclaimed and takes it over
+    while this process is working on it."""
+    _client().post("/analyze", json={"product_name": "air fryer", "countries": ["ESP"]})
+
+    scoring.claim_analysis.assert_awaited_once()
+    assert scoring.claim_analysis.await_args.kwargs["runner"] == public.runner_id()
+
+
+def test_the_runner_names_itself_after_the_pod(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It only has to differ from the other runners and stay stable while this
+    process lives. In the cluster that is the pod name."""
+    public.runner_id.cache_clear()
+    monkeypatch.setenv("HOSTNAME", "marketmind-orchestrator-abc123")
+
+    assert public.runner_id() == "marketmind-orchestrator-abc123"
+
+    public.runner_id.cache_clear()

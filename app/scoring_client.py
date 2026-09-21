@@ -143,6 +143,22 @@ class ScoringClient:
     async def read_analysis(self, request_id: str) -> dict[str, Any]:
         return await self._call("GET", f"/internal/analyses/{request_id}")
 
+    async def orphaned_analyses(self) -> list[str]:
+        """Analyses that are running and that nobody is running.
+
+        Asked once at startup. This process knows it just restarted; what it
+        could not know is which analyses that restart orphaned — and without
+        asking it had to wait for the scoring service's fifteen-minute sweep to
+        notice, with the buyer watching a screen that says "in progress".
+        """
+        return [str(request_id) for request_id in await self._call("GET", "/internal/analyses/orphaned")]
+
+    async def claim_analysis(self, request_id: str, *, runner: str) -> bool:
+        """Whether this process may run it. False when another live process
+        holds it — which is what lets two of these run side by side."""
+        answer = await self._call("POST", f"/internal/analyses/{request_id}/claim?runner={runner}")
+        return bool(answer.get("granted"))
+
     async def mark_running(self, request_id: str) -> dict[str, Any]:
         return await self._call("POST", f"/internal/analyses/{request_id}/running")
 
