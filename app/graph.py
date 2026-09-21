@@ -67,3 +67,20 @@ def build_graph(checkpointer: Any | None = None):  # noqa: ANN201
     workflow.add_edge("give_up", END)
 
     return workflow.compile(checkpointer=checkpointer)
+
+
+# The compiled graph, put here by the lifespan so a background run can reach it.
+# A run started by POST /analyze outlives the request that asked for it, so it
+# cannot read the graph off `request.app.state`.
+_graph: Any | None = None
+
+
+def set_graph(graph: Any) -> None:
+    global _graph
+    _graph = graph
+
+
+def get_graph() -> Any:
+    if _graph is None:
+        raise RuntimeError("The graph is not built yet; the application has not finished starting.")
+    return _graph

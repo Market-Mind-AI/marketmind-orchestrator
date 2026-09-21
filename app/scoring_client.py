@@ -49,13 +49,21 @@ class ScoringClient:
         self._base_url = (base_url or settings.scoring_api_url).rstrip("/")
         self._token = token if token is not None else settings.scoring_internal_token
 
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    def headers(self) -> dict[str, str]:
+        """The auth header, for a caller that streams instead of using _call."""
+        return self._headers()
+
     def _headers(self) -> dict[str, str]:
         # An absent token is not sent as an empty one: the service answers 401
         # either way, and a header that is present but empty reads like a
         # configuration that was attempted rather than one that was never made.
         return {"X-Internal-Token": self._token} if self._token else {}
 
-    async def _call(self, method: str, path: str, *, json: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def _call(self, method: str, path: str, *, json: dict[str, Any] | None = None) -> Any:
         url = f"{self._base_url}{path}"
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
@@ -80,25 +88,52 @@ class ScoringClient:
         self,
         text: str,
         *,
+        source: str = "orchestrator",
         brand: str | None = None,
         category: str | None = None,
+        localized_markets: dict[str, Any] | None = None,
+        reference_candidates: list[dict[str, Any]] | None = None,
         target_age_min: int | None = None,
         target_age_max: int | None = None,
     ) -> dict[str, Any]:
         """Text to a stable entity. The brand PARTITIONS identity rather than
-        being concatenated into the text that decides similarity."""
+        being concatenated into the text that decides similarity.
+
+        `localized_markets` and `reference_candidates` are the curated vocabulary
+        the identify step already produced, carried through with whatever the
+        buyer corrected. Without them the resolve would throw that work away and
+        the enrichment would pay for it again.
+        """
         return await self._call(
             "POST",
             "/catalog/resolve",
             json={
                 "text": text,
-                "source": "orchestrator",
+                "source": source,
                 "brand": brand,
                 "category": category,
+                "localized_markets": localized_markets,
+                "reference_candidates": reference_candidates,
                 "target_age_min": target_age_min,
                 "target_age_max": target_age_max,
             },
         )
+
+    async def identify_image(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """One photo (or one line of text) to a named product with a per-country
+        vocabulary. The buyer sees and corrects this before anything is scored."""
+        return await self._call("POST", "/catalog/identify-image", json=payload)
+
+    async def countries(self) -> Any:
+        """The markets that can be analysed, with the names and flags a report
+        shows. Cached by the caller, not here."""
+        return await self._call("GET", "/countries")
+
+    async def read_report(self, request_id: str) -> dict[str, Any]:
+        """The whole answer shaped for a reader — scores, narrative, evidence
+        packet, brand/category. Distinct from read_analysis, which is the
+        smaller shape a RESUMING RUN needs."""
+        return await self._call("GET", f"/internal/analyses/{request_id}/report")
 
     # --- the analysis record ---
 

@@ -9,8 +9,9 @@ from fastapi.responses import StreamingResponse
 from app import spend
 from app.checkpointer import open_checkpointer
 from app.config import get_settings
-from app.graph import build_graph
+from app.graph import build_graph, set_graph
 from app.observability import callbacks, tracing_enabled
+from app.public import router as public_router
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -22,6 +23,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # application does and the graph is compiled around it once.
     async with open_checkpointer() as checkpointer:
         app.state.graph = build_graph(checkpointer)
+        # Also parked at module level: a run started by POST /analyze outlives
+        # the request that asked for it and cannot read app.state.
+        set_graph(app.state.graph)
         logger.info("Checkpointer: %s", settings.checkpointer)
         if not tracing_enabled():
             # Said once, at startup. Discovering it while trying to explain a
@@ -31,6 +35,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="MarketMind Orchestrator", root_path=settings.root_path, lifespan=lifespan)
+
+
+app.include_router(public_router)
 
 
 @app.get("/healthz")
