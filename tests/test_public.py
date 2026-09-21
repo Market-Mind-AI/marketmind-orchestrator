@@ -37,6 +37,7 @@ def started(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return ids
 
 
+
 def _client() -> TestClient:
     return TestClient(app)
 
@@ -161,3 +162,25 @@ def test_a_run_whose_graph_blew_up_is_recorded_as_failed(scoring: AsyncMock) -> 
         asyncio.get_event_loop_policy().new_event_loop().run_until_complete(public._run("r1"))
 
     scoring.fail_analysis.assert_awaited_once()
+
+
+async def test_a_run_in_flight_is_held_onto(scoring: AsyncMock) -> None:
+    """asyncio keeps only a weak reference to a task, so one nobody holds can be
+    collected mid-run and cancelled. The analysis would just stop, with the
+    record still saying `running` — rare, silent, and impossible to reproduce on
+    demand."""
+    import asyncio
+
+    release = asyncio.Event()
+
+    async def slow(analysis_id: str) -> None:
+        await release.wait()
+
+    with patch.object(public, "_run", slow):
+        public._start("r1")
+        assert len(public._in_flight) == 1  # held while it runs
+        release.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert public._in_flight == set()  # and let go when it finishes

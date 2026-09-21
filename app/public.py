@@ -112,8 +112,21 @@ async def analyze(payload: dict[str, Any]) -> dict[str, Any]:
         raise _as_http_error(exc) from exc
 
     request_id = str(registered["request_id"])
-    asyncio.create_task(_run(request_id))
+    _start(request_id)
     return {"request_id": request_id, "status": registered["status"]}
+
+
+# Strong references to the runs in flight. asyncio keeps only a WEAK reference to
+# a task, so a task nobody holds can be collected mid-run and cancelled — the
+# analysis would simply stop, with the record left saying `running` until the
+# sweep picked it up. Rare, silent, and impossible to reproduce on demand.
+_in_flight: set[asyncio.Task[None]] = set()
+
+
+def _start(analysis_id: str) -> None:
+    task = asyncio.create_task(_run(analysis_id))
+    _in_flight.add(task)
+    task.add_done_callback(_in_flight.discard)
 
 
 async def _run(analysis_id: str) -> None:
