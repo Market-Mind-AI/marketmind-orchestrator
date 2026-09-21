@@ -62,5 +62,10 @@ async def open_checkpointer() -> AsyncIterator[Any]:
         # Creates its own tables if they are not there. Safe to repeat, so it
         # runs on every start rather than being a deployment step someone has
         # to remember.
+        #
+        # They land in whichever database the URL points at, which today is the
+        # one every service shares. Nothing here assumes that: the day each
+        # service gets its own database back, this URL changes and nothing else
+        # does.
         await saver.setup()
         yield saver
