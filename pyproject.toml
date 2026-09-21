@@ -22,10 +22,17 @@ langgraph-checkpoint-postgres = "^3.1.0"
 # wheel: without it the import fails at startup with "no pq wrapper available".
 psycopg = {extras = ["binary", "pool"], version = "^3.3.0"}
 httpx = "^0.28.0"
-# Only what the tracing callback needs. This service calls no model directly:
-# every model call it causes is made by the scoring service behind a tool call,
-# and the judge uses the OpenAI SDK. The provider-specific langchain packages
-# went out with app/llm_factory.py, which nothing imported.
+# What the tracing callback needs. `langchain` itself is NOT optional here even
+# though no code imports it: langfuse.langchain.CallbackHandler imports it at
+# module load and refuses to load without it. Dropping it passed every test —
+# the dev venv still had it — and crashed the container on startup, because the
+# image installs from the lock and nothing else.
+#
+# This service calls no model directly: every model call it causes is made by
+# the scoring service behind a tool call, and the judge uses the OpenAI SDK. The
+# provider-specific langchain packages went out with app/llm_factory.py, which
+# nothing imported.
+langchain = "^1.4.0"
 langchain-core = "^1.6.0"
 langfuse = "^4.15.0"
 openai = "^3.16.0"
