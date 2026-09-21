@@ -129,3 +129,41 @@ async def test_a_judge_that_cannot_be_reached_does_not_fail_the_run(monkeypatch:
     monkeypatch.setattr("openai.AsyncOpenAI", _Boom)
 
     assert await quality.judge_support("anything", _PACKET) is None
+
+
+def test_a_population_restated_in_millions_is_the_same_figure() -> None:
+    """Real, from a Brazilian narrative: it wrote the exact 212.812.405 the
+    packet holds and then restated it as "212,8 milhões". The checker read the
+    second as 212.8, found nothing like it, and reported a hallucination — with
+    an absolute tolerance of 0.5 against a number twelve thousand away, at a
+    scale where twelve thousand is nothing.
+
+    Counting ordinary writing as invention buries the findings that matter.
+    """
+    from app.quality import unsupported_numbers
+
+    packet = {"countries": [{"country": "BRA", "population": 212_812_405}]}
+
+    assert unsupported_numbers("Com 212,8 milhões de habitantes.", packet) == []
+    assert unsupported_numbers("Com 212.812.405 habitantes.", packet) == []
+
+
+def test_a_figure_at_the_wrong_magnitude_is_still_caught() -> None:
+    """The allowance is for the same number written differently, not for any
+    number within a factor of ten. 300 million is not 212.8 million."""
+    from app.quality import unsupported_numbers
+
+    packet = {"countries": [{"country": "BRA", "population": 212_812_405}]}
+
+    assert unsupported_numbers("Com 300 milhões de habitantes.", packet) == [300.0]
+
+
+def test_a_score_is_still_checked_tightly() -> None:
+    """The proportional allowance must not loosen the scores, which are the
+    claims that decide the answer. 40.02 supports "40"; it does not support 44."""
+    from app.quality import unsupported_numbers
+
+    packet = {"countries": [{"country": "ESP", "mos": 40.0219}]}
+
+    assert unsupported_numbers("Spain scores 40.", packet) == []
+    assert unsupported_numbers("Spain scores 44.", packet) == [44.0]

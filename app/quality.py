@@ -112,16 +112,40 @@ def unsupported_numbers(narrative: str, packet: dict[str, Any], *, tolerance: fl
     for value in numbers_in(narrative):
         if abs(value) <= 12 or 1900 <= value <= 2100:
             continue
-        if any(abs(value - ok) <= tolerance for ok in supported):
-            continue
-        # A figure stated as a percentage of something, or as thousands, is
-        # still the packet's number.
-        if any(abs(value - ok * 100) <= tolerance or abs(value * 100 - ok) <= tolerance for ok in supported):
-            continue
-        if any(abs(value - ok / 1000) <= tolerance or abs(value * 1000 - ok) <= tolerance for ok in supported):
-            continue
-        unsupported.append(value)
+        if not _is_supported(value, supported, tolerance):
+            unsupported.append(value)
     return unsupported
+
+
+# The same number written at a different magnitude: a percentage, or thousands,
+# or "212.8 million" for a population the packet holds as 212,812,405. All of
+# these are the packet's own figure restated, and counting them as unsupported
+# buries the real finding under ordinary writing.
+_MAGNITUDES = (1, 1e2, 1e3, 1e6, 1e9)
+
+# Rounding to millions cannot be checked with an absolute tolerance. "212.8
+# million" and 212,812,405 are twelve thousand apart, which is nothing at that
+# scale and everything at the scale of a score. Proportion is the right measure
+# once the magnitudes differ — a fabricated figure landing within a tenth of a
+# percent of a real one, at an exact power of ten, is not a way anyone gets a
+# number wrong.
+_RELATIVE_TOLERANCE = 1e-3
+
+
+def _is_supported(value: float, supported: set[float], tolerance: float) -> bool:
+    """Whether the evidence holds this figure, at any ordinary magnitude.
+
+    Rounding is allowed in both directions — a packet holding 40.0219 supports
+    "40", and a packet holding 212,812,405 supports "212.8 million".
+    """
+    for ok in supported:
+        for scale in _MAGNITUDES:
+            for stated, held in ((value * scale, ok), (value, ok * scale)):
+                if abs(stated - held) <= tolerance:
+                    return True
+                if held and abs(stated - held) <= abs(held) * _RELATIVE_TOLERANCE:
+                    return True
+    return False
 
 
 def language_violations(narrative: str) -> list[str]:
