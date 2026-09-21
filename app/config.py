@@ -5,6 +5,12 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    # Reads .env, the same way every other service here does. Without it this
+    # service only ever saw real environment variables, so a .env sitting next
+    # to it was silently ignored -- and the failure looked like a wrong token
+    # rather than a file nobody read.
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+
     # Path prefix a reverse proxy serves this API under and strips before
     # forwarding — "/orchestrator" on Azure, empty locally. Without it FastAPI
     # believes it sits at the root and builds the Swagger page pointing at an
