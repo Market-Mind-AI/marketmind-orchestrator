@@ -138,8 +138,8 @@ async def _run(analysis_id: str) -> None:
     to raise to.
     """
     from app.graph import get_graph
+    from app import observability, spend
     from app.observability import callbacks
-    from app import spend
 
     try:
         graph = get_graph()
@@ -149,7 +149,7 @@ async def _run(analysis_id: str) -> None:
 
     config = {"configurable": {"thread_id": analysis_id}, "callbacks": callbacks()}
     try:
-        with spend.tally():
+        with observability.run(analysis_id), spend.tally():
             await graph.ainvoke({"analysis_id": analysis_id}, config=config)
     except Exception:  # noqa: BLE001 — nothing left to raise to; the record carries the outcome
         logger.exception("Analysis %s ended in an unhandled error", analysis_id)

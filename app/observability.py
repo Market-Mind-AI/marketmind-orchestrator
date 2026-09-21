@@ -12,6 +12,8 @@ than silently, so nobody discovers it while trying to explain a bad run.
 """
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any
 
@@ -45,6 +47,33 @@ def callbacks() -> list[Any]:
 
 def tracing_enabled() -> bool:
     return _handler() is not None
+
+
+@contextmanager
+def run(analysis_id: str) -> Iterator[None]:
+    """Hold one analysis's trace open for the length of its graph run.
+
+    The measures are recorded from inside the nodes, and scoring "the current
+    trace" needs a span that is current there. The LangChain handler opens spans
+    but makes none of them current, so without this every score was dropped with
+    a warning. The handler nests the graph under this span instead of starting a
+    trace of its own.
+
+    The trace id is derived from the analysis id: the run can be found in
+    Langfuse from the record, and a resume by the same id lands in the same trace.
+    """
+    if _handler() is None:
+        yield
+        return
+
+    from langfuse import Langfuse, get_client
+
+    with get_client().start_as_current_observation(
+        name="analysis",
+        trace_context={"trace_id": Langfuse.create_trace_id(seed=analysis_id)},
+        metadata={"analysis_id": analysis_id},
+    ):
+        yield
 
 
 def record(name: str, value: float | str | bool, *, comment: str | None = None) -> None:

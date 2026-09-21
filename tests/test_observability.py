@@ -38,6 +38,38 @@ def test_with_both_keys_a_handler_is_attached(monkeypatch: pytest.MonkeyPatch) -
     assert observability.tracing_enabled() is True
 
 
+def test_a_measure_recorded_during_a_run_lands_on_that_runs_trace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The five measures are recorded from inside graph nodes, where the
+    LangChain handler has opened spans but none of them is the current one. With
+    nothing current, score_current_trace() logged "No active span in current
+    context" and dropped every score: they reached the log and never Langfuse.
+
+    The trace is the analysis id's, so the run can be found from the record and
+    a resume by the same id lands in the same trace."""
+    from langfuse import Langfuse
+
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    monkeypatch.setenv("LANGFUSE_HOST", "http://localhost:3000")
+    scored: list[dict] = []
+    monkeypatch.setattr(Langfuse, "create_score", lambda self, **score: scored.append(score))
+
+    analysis_id = "a8c5d38b-db60-413c-b8f3-086a0befb83a"
+    with observability.run(analysis_id):
+        observability.record("task_completion_rate", 0.0)
+
+    assert [s["name"] for s in scored] == ["task_completion_rate"]
+    assert scored[0]["trace_id"] == Langfuse.create_trace_id(seed=analysis_id)
+
+
+def test_a_run_without_tracing_still_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+
+    with observability.run("a8c5d38b-db60-413c-b8f3-086a0befb83a"):
+        observability.record("task_completion_rate", 1.0)
+
+
 @pytest.fixture
 def clean_logging():
     """setup_logging binds the stdout it sees and then refuses to add a second

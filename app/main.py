@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from app import spend
+from app import observability, spend
 from app.checkpointer import open_checkpointer
 from app.config import get_settings
 from app.graph import build_graph, set_graph
@@ -73,7 +73,7 @@ async def run_analysis(request: Request):
         # The tally is opened around the whole stream so every node's tool calls
         # add to the same one; the nodes read it when they report the run.
         try:
-            with spend.tally():
+            with observability.run(str(analysis_id)), spend.tally():
                 async for event in request.app.state.graph.astream(payload, config=config):
                     yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:  # noqa: BLE001 — the stream is the only channel back
