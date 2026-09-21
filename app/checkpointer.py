@@ -50,15 +50,17 @@ async def open_checkpointer() -> AsyncIterator[Any]:
     if kind != "postgres":
         raise CheckpointerNotConfigured(f"Unknown CHECKPOINTER '{settings.checkpointer}'; use 'postgres' or 'memory'.")
 
-    if not settings.checkpointer_database_url:
+    url = settings.resolved_checkpointer_url
+    if not url:
         raise CheckpointerNotConfigured(
-            "CHECKPOINTER is 'postgres' but CHECKPOINTER_DATABASE_URL is not set. "
-            "Set it, or ask for CHECKPOINTER=memory explicitly and accept losing runs on restart."
+            "CHECKPOINTER is 'postgres' but no connection is configured. Set "
+            "CHECKPOINTER_DB_HOST/NAME/USER/PASSWORD (or CHECKPOINTER_DATABASE_URL), "
+            "or ask for CHECKPOINTER=memory explicitly and accept losing runs on restart."
         )
 
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-    async with AsyncPostgresSaver.from_conn_string(settings.checkpointer_database_url) as saver:
+    async with AsyncPostgresSaver.from_conn_string(url) as saver:
         # Creates its own tables if they are not there. Safe to repeat, so it
         # runs on every start rather than being a deployment step someone has
         # to remember.

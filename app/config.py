@@ -1,4 +1,5 @@
 from typing import Optional
+from urllib.parse import quote
 
 from pydantic_settings import BaseSettings
 
@@ -19,8 +20,11 @@ class Settings(BaseSettings):
     llm_api_url: str = "http://marketmind-ollma-llm:8000"
 
     # The scoring service, and the shared secret its /internal tools require.
-    core_api_url: str = "http://marketmind-core:8000"
-    core_internal_token: Optional[str] = None
+    # It is still deployed under the name marketmind-core; the DNS name changes
+    # when the service is renamed, and this line is the only thing that has to
+    # change with it.
+    scoring_api_url: str = "http://marketmind-core:8000"
+    scoring_internal_token: Optional[str] = None
 
     # Provider routing: "claude", "gpt", or "ollama"
     extraction_provider: str = "claude"
@@ -37,13 +41,37 @@ class Settings(BaseSettings):
     # it is gone. Where the graph got to has to outlive the process, so a
     # restart resumes instead of starting over and charging twice.
     #
-    # "postgres" needs checkpointer_database_url. "memory" keeps it in the
-    # process and loses everything on restart, which is fine for a test and
-    # never fine anywhere else — so it has to be asked for by name. A missing
-    # URL is a startup failure rather than a silent downgrade: durability that
-    # quietly is not there is worse than none, because nothing looks wrong.
+    # "postgres" needs the connection below. "memory" keeps it in the process
+    # and loses everything on restart, which is fine for a test and never fine
+    # anywhere else — so it has to be asked for by name. Missing connection
+    # details are a startup failure rather than a silent downgrade: durability
+    # that quietly is not there is worse than none, because nothing looks wrong.
     checkpointer: str = "postgres"
+
+    # Given in parts, not as a URL, matching every other service here. A URL in
+    # the vault would carry a copy of the database password, and the password
+    # already lives there once — changing it would then mean remembering two
+    # places, with the second failing silently.
+    #
+    # checkpointer_database_url still wins when set, for a local one-liner.
+    checkpointer_db_host: Optional[str] = None
+    checkpointer_db_port: int = 5432
+    checkpointer_db_name: Optional[str] = None
+    checkpointer_db_user: Optional[str] = None
+    checkpointer_db_password: Optional[str] = None
     checkpointer_database_url: Optional[str] = None
+
+    @property
+    def resolved_checkpointer_url(self) -> Optional[str]:
+        if self.checkpointer_database_url:
+            return self.checkpointer_database_url
+        if not (self.checkpointer_db_host and self.checkpointer_db_name and self.checkpointer_db_user):
+            return None
+        password = quote(self.checkpointer_db_password or "", safe="")
+        return (
+            f"postgresql://{self.checkpointer_db_user}:{password}"
+            f"@{self.checkpointer_db_host}:{self.checkpointer_db_port}/{self.checkpointer_db_name}"
+        )
 
     # --- Observability ---
     #

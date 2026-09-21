@@ -2,13 +2,13 @@ import httpx
 import pytest
 import respx
 
-from app.core_client import CoreClient, CoreRejected, CoreUnavailable
+from app.scoring_client import ScoringClient, ScoringRejected, ScoringUnavailable
 
 _BASE = "http://core.test"
 
 
-def _client() -> CoreClient:
-    return CoreClient(base_url=_BASE, token="secret")
+def _client() -> ScoringClient:
+    return ScoringClient(base_url=_BASE, token="secret")
 
 
 @respx.mock
@@ -30,7 +30,7 @@ async def test_no_token_sends_no_header_rather_than_an_empty_one() -> None:
     one reads like one that was never made, which is the truth."""
     route = respx.post(f"{_BASE}/internal/analyses").mock(return_value=httpx.Response(201, json={}))
 
-    await CoreClient(base_url=_BASE, token=None).register_analysis(countries=["ESP"])
+    await ScoringClient(base_url=_BASE, token=None).register_analysis(countries=["ESP"])
 
     assert "X-Internal-Token" not in route.calls.last.request.headers
 
@@ -42,7 +42,7 @@ async def test_no_token_sends_no_header_rather_than_an_empty_one() -> None:
 async def test_an_unreachable_service_is_retryable() -> None:
     respx.post(f"{_BASE}/internal/analyses").mock(side_effect=httpx.ConnectError("refused"))
 
-    with pytest.raises(CoreUnavailable):
+    with pytest.raises(ScoringUnavailable):
         await _client().register_analysis(countries=["ESP"])
 
 
@@ -50,7 +50,7 @@ async def test_an_unreachable_service_is_retryable() -> None:
 async def test_a_server_error_is_retryable() -> None:
     respx.post(f"{_BASE}/internal/analyses").mock(return_value=httpx.Response(503, json={"detail": "down"}))
 
-    with pytest.raises(CoreUnavailable):
+    with pytest.raises(ScoringUnavailable):
         await _client().register_analysis(countries=["ESP"])
 
 
@@ -62,7 +62,7 @@ async def test_a_refusal_is_not_retryable_and_carries_the_reason() -> None:
         return_value=httpx.Response(401, json={"detail": "Invalid or missing X-Internal-Token."})
     )
 
-    with pytest.raises(CoreRejected) as excinfo:
+    with pytest.raises(ScoringRejected) as excinfo:
         await _client().ensure_coverage("ESP", None)
 
     assert excinfo.value.status_code == 401

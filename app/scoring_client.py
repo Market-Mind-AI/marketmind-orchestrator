@@ -9,8 +9,8 @@ whose answer is the same every time it is asked, which is what lets a resumed
 run re-run it safely.
 
 Two failures are told apart deliberately, because they lead to opposite
-decisions. A CoreUnavailable is the service being unreachable or broken, and it
-is worth retrying. A CoreRejected is the service saying no -- a bad request, an
+decisions. A ScoringUnavailable is the service being unreachable or broken, and it
+is worth retrying. A ScoringRejected is the service saying no -- a bad request, an
 unknown entity, a missing token -- and retrying it just repeats the answer.
 """
 
@@ -25,15 +25,15 @@ from app.config import get_settings
 _TIMEOUT = httpx.Timeout(600.0, connect=5.0)
 
 
-class CoreError(RuntimeError):
+class ScoringError(RuntimeError):
     """Base for anything that went wrong talking to the scoring service."""
 
 
-class CoreUnavailable(CoreError):
+class ScoringUnavailable(ScoringError):
     """Unreachable, timed out, or answered 5xx. Worth retrying."""
 
 
-class CoreRejected(CoreError):
+class ScoringRejected(ScoringError):
     """Answered 4xx: the request was wrong, not the moment. Retrying repeats it."""
 
     def __init__(self, status_code: int, detail: str) -> None:
@@ -42,11 +42,11 @@ class CoreRejected(CoreError):
         self.detail = detail
 
 
-class CoreClient:
+class ScoringClient:
     def __init__(self, base_url: str | None = None, token: str | None = None) -> None:
         settings = get_settings()
-        self._base_url = (base_url or settings.core_api_url).rstrip("/")
-        self._token = token if token is not None else settings.core_internal_token
+        self._base_url = (base_url or settings.scoring_api_url).rstrip("/")
+        self._token = token if token is not None else settings.scoring_internal_token
 
     def _headers(self) -> dict[str, str]:
         # An absent token is not sent as an empty one: the service answers 401
@@ -60,12 +60,12 @@ class CoreClient:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 response = await client.request(method, url, json=json, headers=self._headers())
         except httpx.HTTPError as exc:
-            raise CoreUnavailable(f"{method} {path} failed: {exc}") from exc
+            raise ScoringUnavailable(f"{method} {path} failed: {exc}") from exc
 
         if 400 <= response.status_code < 500:
-            raise CoreRejected(response.status_code, _detail(response))
+            raise ScoringRejected(response.status_code, _detail(response))
         if response.status_code >= 500:
-            raise CoreUnavailable(f"{method} {path} answered {response.status_code}: {_detail(response)}")
+            raise ScoringUnavailable(f"{method} {path} answered {response.status_code}: {_detail(response)}")
         return response.json() if response.content else {}
 
     # --- identity ---

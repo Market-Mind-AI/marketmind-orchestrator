@@ -12,18 +12,19 @@ async def test_memory_has_to_be_asked_for_by_name(monkeypatch: pytest.MonkeyPatc
         assert checkpointer.__class__.__name__ == "InMemorySaver"
 
 
-async def test_postgres_without_a_url_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_postgres_without_a_connection_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never a silent downgrade to memory. Durability that quietly is not there
     is worse than none: nothing looks wrong until a pod restarts mid-analysis,
     which is exactly when nobody is watching."""
     monkeypatch.setenv("CHECKPOINTER", "postgres")
-    monkeypatch.delenv("CHECKPOINTER_DATABASE_URL", raising=False)
+    for name in ("CHECKPOINTER_DATABASE_URL", "CHECKPOINTER_DB_HOST", "CHECKPOINTER_DB_NAME", "CHECKPOINTER_DB_USER"):
+        monkeypatch.delenv(name, raising=False)
 
     with pytest.raises(CheckpointerNotConfigured) as excinfo:
         async with open_checkpointer():
             pass
 
-    assert "CHECKPOINTER_DATABASE_URL" in str(excinfo.value)
+    assert "CHECKPOINTER_DB_HOST" in str(excinfo.value)
 
 
 async def test_an_unknown_kind_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,3 +69,40 @@ async def test_the_same_thread_resumes_and_a_different_one_does_not(monkeypatch:
     assert first["steps"] == ["ran"]
     assert again["steps"] == ["ran", "ran"], "the same thread continues the run that was there"
     assert other["steps"] == ["ran"], "a different analysis starts clean"
+
+
+async def test_the_url_is_built_from_the_parts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Parts, not a URL, matching every other service here. A URL in the vault
+    would carry a second copy of the database password, and changing the
+    password would then mean remembering two places."""
+    monkeypatch.setenv("CHECKPOINTER_DB_HOST", "pg.example")
+    monkeypatch.setenv("CHECKPOINTER_DB_NAME", "marketmind")
+    monkeypatch.setenv("CHECKPOINTER_DB_USER", "marketmind")
+    monkeypatch.setenv("CHECKPOINTER_DB_PASSWORD", "p@ss word/1")
+    monkeypatch.delenv("CHECKPOINTER_DATABASE_URL", raising=False)
+
+    url = get_settings().resolved_checkpointer_url
+
+    assert url == "postgresql://marketmind:p%40ss%20word%2F1@pg.example:5432/marketmind", (
+        "a password with reserved characters has to survive being put in a URL"
+    )
+
+
+async def test_a_whole_url_still_wins_for_a_local_one_liner(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHECKPOINTER_DATABASE_URL", "postgresql://u:p@localhost:5436/db")
+    monkeypatch.setenv("CHECKPOINTER_DB_HOST", "ignored.example")
+
+    assert get_settings().resolved_checkpointer_url == "postgresql://u:p@localhost:5436/db"
+
+
+async def test_partial_connection_details_are_not_half_a_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host with no database name is a configuration someone started and did
+    not finish, and it fails at startup like any other missing one."""
+    monkeypatch.setenv("CHECKPOINTER", "postgres")
+    monkeypatch.setenv("CHECKPOINTER_DB_HOST", "pg.example")
+    monkeypatch.delenv("CHECKPOINTER_DB_NAME", raising=False)
+    monkeypatch.delenv("CHECKPOINTER_DATABASE_URL", raising=False)
+
+    with pytest.raises(CheckpointerNotConfigured):
+        async with open_checkpointer():
+            pass

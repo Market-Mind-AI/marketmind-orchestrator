@@ -112,9 +112,9 @@ async def test_a_source_that_lacks_the_datum_ends_the_run_with_a_reason(core: As
 async def test_a_failed_narration_does_not_undo_a_delivered_answer(core: AsyncMock) -> None:
     """An earlier version guarded only the model call, and a failure in the
     write marked an already-successful analysis as failed."""
-    from app.core_client import CoreUnavailable
+    from app.scoring_client import ScoringUnavailable
 
-    core.attach_narrative = AsyncMock(side_effect=CoreUnavailable("down"))
+    core.attach_narrative = AsyncMock(side_effect=ScoringUnavailable("down"))
 
     final = await build_graph().ainvoke({"analysis_id": "a1"})
 

@@ -15,7 +15,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from app.core_client import CoreClient, CoreRejected, CoreUnavailable
+from app.scoring_client import ScoringClient, ScoringRejected, ScoringUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +30,8 @@ INSIST_FOR = timedelta(hours=24)
 MAX_ATTEMPTS = 3
 
 
-def _client() -> CoreClient:
-    return CoreClient()
+def _client() -> ScoringClient:
+    return ScoringClient()
 
 
 def _period_key(now: datetime | None = None) -> str:
@@ -105,7 +105,7 @@ async def collect_node(state: dict) -> dict:
         try:
             tasks.extend(await core.ensure_coverage(country, entity_key))
             collected.append(country)
-        except CoreUnavailable as exc:
+        except ScoringUnavailable as exc:
             # Transient by definition. Recorded, not raised: one country's
             # source being down must not abandon the others' collection.
             logger.warning("Collection for %s could not run: %s", country, exc)
@@ -333,7 +333,7 @@ async def narrate_node(state: dict) -> dict:
         )
         await core.attach_narrative(state["analysis_id"], narrative)
         return {"narrative": narrative}
-    except (CoreUnavailable, CoreRejected) as exc:
+    except (ScoringUnavailable, ScoringRejected) as exc:
         logger.exception("Analysis %s is delivered, but attaching its narrative failed", state["analysis_id"])
         return {"errors": [f"narration failed: {exc}"]}
 
