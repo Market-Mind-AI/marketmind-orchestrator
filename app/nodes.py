@@ -243,6 +243,7 @@ async def champion_node(state: dict) -> dict:
         return {}
 
     core = _client()
+    await core.record_progress(state["analysis_id"], "looking for the product's best market")
     scored = [r for r in results if r.get("mos") is not None]
     best_requested = max(scored, key=lambda r: float(r["mos"]), default=None)
 
@@ -283,7 +284,9 @@ async def evidence_node(state: dict) -> dict:
     if not entity_key:
         return {"breakdown": None}
 
-    packet = await _client().build_evidence(
+    core = _client()
+    await core.record_progress(state["analysis_id"], "assembling the evidence")
+    packet = await core.build_evidence(
         entity_key, state["countries"], state["period_key"], state.get("demand_ruler")
     )
     if packet is not None:
@@ -328,10 +331,16 @@ async def narrate_node(state: dict) -> dict:
 
     try:
         core = _client()
+        # Said before the call, not after. The request is already complete at
+        # this point, so without it the reader sees a finished analysis with an
+        # explanation that is simply absent, and no way to tell "coming" from
+        # "never".
+        await core.record_progress(state["analysis_id"], "writing the explanation")
         narrative = await core.narrate(
             packet, state.get("canonical_title") or "", state.get("user_prompt")
         )
         await core.attach_narrative(state["analysis_id"], narrative)
+        await core.record_progress(state["analysis_id"], None)
         return {"narrative": narrative}
     except (ScoringUnavailable, ScoringRejected) as exc:
         logger.exception("Analysis %s is delivered, but attaching its narrative failed", state["analysis_id"])

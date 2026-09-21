@@ -131,3 +131,42 @@ async def test_the_evidence_packet_marks_the_champion_and_the_requested(core: As
     packet = core.complete_analysis.await_args.kwargs["breakdown"]
     assert packet["champion_country"] == "BRA"
     assert packet["requested_countries"] == ["ESP", "PRT"]
+
+
+async def test_the_run_keeps_saying_what_it_is_doing_to_the_very_end(core: AsyncMock) -> None:
+    """It used to fall silent after scoring. Everything past that — crowning the
+    champion, which can collect, assembling the evidence, writing the
+    explanation — reported nothing, so the reader watched a stale line for the
+    last stretch and then saw the answer appear with no warning."""
+    await build_graph().ainvoke({"analysis_id": "a1"})
+
+    said = [call.args[1] for call in core.record_progress.await_args_list]
+
+    assert "scoring the markets" in said
+    assert any("best market" in (s or "") for s in said), "crowning the champion can collect"
+    assert any("evidence" in (s or "") for s in said)
+    assert any("explanation" in (s or "") for s in said)
+
+
+async def test_it_says_the_explanation_is_coming_before_writing_it(core: AsyncMock) -> None:
+    """The request is already marked done by then, so without this the reader
+    sees a finished analysis whose explanation is simply absent — with no way
+    to tell "on its way" from "never arriving"."""
+    await build_graph().ainvoke({"analysis_id": "a1"})
+
+    said = [call.args[1] for call in core.record_progress.await_args_list]
+    writing = said.index("writing the explanation")
+
+    assert core.narrate.await_count == 1
+    assert said[writing + 1] is None, "and cleared once it lands, so nothing stale is left behind"
+
+
+async def test_a_failed_narration_leaves_no_stale_line_claiming_it_is_coming(core: AsyncMock) -> None:
+    from app.scoring_client import ScoringUnavailable
+
+    core.narrate = AsyncMock(side_effect=ScoringUnavailable("down"))
+
+    final = await build_graph().ainvoke({"analysis_id": "a1"})
+
+    assert any("narration failed" in e for e in final["errors"])
+    core.complete_analysis.assert_awaited_once()
