@@ -20,7 +20,7 @@ def core(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
         }
     )
     client.ensure_coverage = AsyncMock(return_value=[])
-    client.candidates_coverage = AsyncMock(return_value=False)
+    client.candidates_coverage = AsyncMock(return_value={"champion_cached": False})
     client.demand_ceiling = AsyncMock(return_value=(1_500_000.0, {"mode": "reference_candidate"}))
     client.compute_mos = AsyncMock(
         return_value=[{"country": "ESP", "mos": 70.0}, {"country": "PRT", "mos": 61.0}]
@@ -61,7 +61,9 @@ async def test_the_delivered_rows_say_which_markets_were_asked_for(core: AsyncMo
 async def test_a_cached_champion_skips_the_slowest_collection(core: AsyncMock) -> None:
     """Candidate demand re-run produces the same answer, and it is most of what
     a repeated analysis would otherwise pay for."""
-    core.candidates_coverage = AsyncMock(return_value=True)
+    core.candidates_coverage = AsyncMock(
+        return_value={"champion_cached": True, "champion_country": "BRA", "champion_mos": 88.0}
+    )
 
     await build_graph().ainvoke({"analysis_id": "a1"})
 
@@ -170,3 +172,71 @@ async def test_a_failed_narration_leaves_no_stale_line_claiming_it_is_coming(cor
 
     assert any("narration failed" in e for e in final["errors"])
     core.complete_analysis.assert_awaited_once()
+
+
+# --- The crown means "beats everything you asked about" ---
+
+
+def _cached(country: str, mos: float) -> dict:
+    return {"champion_cached": True, "champion_country": country, "champion_mos": mos}
+
+
+async def test_a_cached_champion_that_still_wins_keeps_the_crown(core: AsyncMock) -> None:
+    core.candidates_coverage = AsyncMock(return_value=_cached("BRA", 88.0))
+
+    await build_graph().ainvoke({"analysis_id": "a1"})
+
+    assert core.complete_analysis.await_args.kwargs["breakdown"]["champion_country"] == "BRA"
+    core.set_champion.assert_not_awaited()
+
+
+async def test_a_requested_market_that_beats_it_takes_the_crown(core: AsyncMock) -> None:
+    """A champion stored at 66.37 stayed crowned in a later analysis where a
+    requested market scored 69 — a visibly false claim, and the reason the
+    comparison has to be re-run rather than the stored value trusted."""
+    core.candidates_coverage = AsyncMock(return_value=_cached("BRA", 66.37))
+    core.compute_mos = AsyncMock(return_value=[{"country": "ESP", "mos": 69.03}, {"country": "PRT", "mos": 40.0}])
+
+    await build_graph().ainvoke({"analysis_id": "a1"})
+
+    assert core.complete_analysis.await_args.kwargs["breakdown"]["champion_country"] == "ESP"
+
+
+async def test_the_beaten_champion_is_replaced_not_merely_displaced(core: AsyncMock) -> None:
+    """Fixing the current report is not enough. Left stored, the beaten
+    champion is reloaded and crowned again on every later analysis — a request
+    for two other markets would crown BRA at 66.37 while ESP at 69.03 was
+    already known to be better."""
+    core.candidates_coverage = AsyncMock(return_value=_cached("BRA", 66.37))
+    core.compute_mos = AsyncMock(return_value=[{"country": "ESP", "mos": 69.03}, {"country": "PRT", "mos": 40.0}])
+
+    await build_graph().ainvoke({"analysis_id": "a1"})
+
+    core.set_champion.assert_awaited_once()
+    stored = core.set_champion.await_args
+    assert stored.kwargs["country"] == "ESP"
+    assert stored.kwargs["mos"] == 69.03
+
+
+async def test_a_tie_leaves_the_crown_with_the_requested_market(core: AsyncMock) -> None:
+    """Strictly greater, so an equal stored champion adds nothing: the caller
+    already has that market in their own list."""
+    core.candidates_coverage = AsyncMock(return_value=_cached("BRA", 70.0))
+    core.compute_mos = AsyncMock(return_value=[{"country": "ESP", "mos": 70.0}, {"country": "PRT", "mos": 40.0}])
+
+    await build_graph().ainvoke({"analysis_id": "a1"})
+
+    assert core.complete_analysis.await_args.kwargs["breakdown"]["champion_country"] == "ESP"
+    core.set_champion.assert_awaited_once()
+
+
+async def test_a_cached_champion_wins_when_nothing_requested_scored(core: AsyncMock) -> None:
+    core.candidates_coverage = AsyncMock(return_value=_cached("BRA", 66.37))
+    core.compute_mos = AsyncMock(return_value=[{"country": "ESP", "mos": None}, {"country": "PRT", "mos": None}])
+    core.ensure_coverage = AsyncMock(return_value=[{"country": "ESP", "status": "success"}])
+
+    await build_graph().ainvoke({"analysis_id": "a1"})
+
+    # Nothing requested could be scored, so the run gives up rather than
+    # delivering a ranking made only of a market nobody asked about.
+    core.fail_analysis.assert_awaited_once()

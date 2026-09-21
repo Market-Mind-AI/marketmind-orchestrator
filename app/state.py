@@ -50,6 +50,11 @@ class OrchestratorState(TypedDict, total=False):
     # collection in the system can be skipped, and skipping it is most of what
     # makes a repeated analysis fast.
     champion_cached: bool
+    # The champion already stored for this period, when there is one. Carried
+    # because the comparison needs the figure: a stored champion a requested
+    # market now beats has to be replaced rather than crowned again.
+    cached_champion_country: str | None
+    cached_champion_mos: float | None
     champion_country: str | None
 
     # The ruler the countries' demand is read against, and which ruler it is.

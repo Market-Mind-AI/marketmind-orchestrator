@@ -168,13 +168,17 @@ class ScoringClient:
 
     async def candidates_coverage(
         self, entity_key: str, requested_countries: list[str], period_key: str
-    ) -> bool:
-        """Returns whether the period's champion was already cached.
+    ) -> dict[str, Any]:
+        """Collect the reference markets, unless the period's champion is known.
 
-        Cached means skip: candidate demand is the slowest collection in the
-        system and re-running it produces the same answer.
+        Cached means the collection is skipped: candidate demand is the slowest
+        work in the system and re-running it produces the same answer.
+
+        The stored champion comes back with the flag, and the figure matters as
+        much as the fact: a stored champion that a requested market now beats
+        has to be replaced, not crowned again.
         """
-        body = await self._call(
+        return await self._call(
             "POST",
             "/internal/candidates/coverage",
             json={
@@ -183,7 +187,6 @@ class ScoringClient:
                 "period_key": period_key,
             },
         )
-        return bool(body.get("champion_cached"))
 
     async def demand_ceiling(
         self, entity_key: str, countries: list[str], period_key: str

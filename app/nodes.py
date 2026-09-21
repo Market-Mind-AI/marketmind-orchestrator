@@ -129,9 +129,15 @@ async def ruler_node(state: dict) -> dict:
 
     core = _client()
     await core.record_progress(state["analysis_id"], "settling the demand ruler")
-    cached = await core.candidates_coverage(entity_key, state["countries"], state["period_key"])
+    known = await core.candidates_coverage(entity_key, state["countries"], state["period_key"])
     ceiling, ruler = await core.demand_ceiling(entity_key, state["countries"], state["period_key"])
-    return {"champion_cached": cached, "demand_ceiling": ceiling, "demand_ruler": ruler}
+    return {
+        "champion_cached": bool(known.get("champion_cached")),
+        "cached_champion_country": known.get("champion_country"),
+        "cached_champion_mos": known.get("champion_mos"),
+        "demand_ceiling": ceiling,
+        "demand_ruler": ruler,
+    }
 
 
 async def measure_node(state: dict) -> dict:
@@ -248,7 +254,35 @@ async def champion_node(state: dict) -> dict:
     best_requested = max(scored, key=lambda r: float(r["mos"]), default=None)
 
     if state.get("champion_cached"):
-        return {"champion_country": best_requested["country"] if best_requested else None}
+        # The crown means "beats everything you asked about". A stored champion
+        # that a requested market now beats is not one, and saying otherwise
+        # produced a visibly false claim once: a champion stored at 66.37 stayed
+        # crowned in a later analysis where a requested market scored 69.
+        cached_country = state.get("cached_champion_country")
+        cached_mos = state.get("cached_champion_mos")
+        still_wins = (
+            cached_country is not None
+            and cached_mos is not None
+            and (best_requested is None or float(cached_mos) > float(best_requested["mos"]))
+        )
+        if still_wins:
+            return {"champion_country": cached_country}
+
+        if best_requested is None:
+            return {}
+
+        # Promoted, not merely displaced. The stored value means "this product's
+        # best known market", so leaving a beaten one in place keeps it wrong
+        # for every analysis after this one — a later request for two other
+        # markets would reload it and crown it again. Cheap: the numbers are
+        # already in hand and no candidate collection is involved.
+        await core.set_champion(
+            entity_key,
+            state["period_key"],
+            country=best_requested["country"],
+            mos=float(best_requested["mos"]),
+        )
+        return {"champion_country": best_requested["country"]}
 
     candidates = await core.score_candidates(
         entity_key, state["countries"], state["period_key"], state.get("demand_ceiling")

@@ -93,12 +93,18 @@ async def test_coverage_answers_with_the_tasks_it_dispatched() -> None:
 
 
 @respx.mock
-async def test_a_cached_champion_is_reported_so_the_slow_work_can_be_skipped() -> None:
+async def test_a_cached_champion_comes_back_with_its_figure_not_just_the_fact() -> None:
+    """The figure decides whether it is still a champion. A stored one that a
+    requested market now beats has to be replaced, not crowned again."""
     respx.post(f"{_BASE}/internal/candidates/coverage").mock(
-        return_value=httpx.Response(200, json={"entity_key": "e1", "champion_cached": True})
+        return_value=httpx.Response(
+            200, json={"entity_key": "e1", "champion_cached": True, "champion_country": "BRA", "champion_mos": 66.37}
+        )
     )
 
-    assert await _client().candidates_coverage("e1", ["ESP"], "2026-09") is True
+    body = await _client().candidates_coverage("e1", ["ESP"], "2026-09")
+
+    assert body["champion_cached"] is True
 
 
 @respx.mock
