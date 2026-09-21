@@ -55,7 +55,10 @@ class ScoringClient:
         return self._base_url
 
     def headers(self) -> dict[str, str]:
-        """The auth header, for a caller that streams instead of using _call."""
+        """The auth header, for a caller that streams instead of using _call.
+
+        Also carries the run's trace context (`traceparent`) when called during
+        a run, so the model calls it causes land inside that trace too."""
         return self._headers()
 
     def _headers(self) -> dict[str, str]:

@@ -199,7 +199,7 @@ async def test_a_call_that_failed_still_reports_what_it_burned() -> None:
 
 def test_a_call_made_during_a_run_carries_the_runs_trace(monkeypatch) -> None:
     """So the model calls it causes in the scoring service land inside the run's
-    trace, under the step that asked, instead of in traces of their own."""
+    trace, under the run's `analysis` span, instead of in traces of their own."""
     from langfuse import Langfuse
 
     from app import observability
