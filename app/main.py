@@ -1,16 +1,35 @@
 import json
+import logging
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from app.checkpointer import open_checkpointer
 from app.config import get_settings
 from app.graph import build_graph
+from app.observability import callbacks, tracing_enabled
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
-app = FastAPI(title="MarketMind Orchestrator", root_path=settings.root_path)
 
-graph = build_graph()
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    # The checkpointer holds a connection pool, so it lives as long as the
+    # application does and the graph is compiled around it once.
+    async with open_checkpointer() as checkpointer:
+        app.state.graph = build_graph(checkpointer)
+        logger.info("Checkpointer: %s", settings.checkpointer)
+        if not tracing_enabled():
+            # Said once, at startup. Discovering it while trying to explain a
+            # bad run is discovering it too late.
+            logger.warning("Langfuse is not configured; runs will not be traced.")
+        yield
+
+
+app = FastAPI(title="MarketMind Orchestrator", root_path=settings.root_path, lifespan=lifespan)
 
 
 @app.get("/healthz")
@@ -22,15 +41,25 @@ def healthz():
 async def run_analysis(request: Request):
     payload = await request.json()
 
+    # The thread id IS the analysis id, and that is what makes re-invoking mean
+    # "resume" instead of "start another one". A generated id would create a
+    # second run of the same analysis every time anything retried.
+    analysis_id = payload.get("analysis_id")
+    if not analysis_id:
+        raise HTTPException(status_code=422, detail="analysis_id is required: it is the run's identity.")
+
+    config = {"configurable": {"thread_id": str(analysis_id)}, "callbacks": callbacks()}
+
     async def event_generator():
         # A run that dies mid-stream used to close the connection with no final
         # event, which reads to the caller exactly like a run that finished
         # quietly. The caller then has to guess, and the guess that costs money
         # is "it worked". So a failure says so, on the stream, before closing.
         try:
-            async for event in graph.astream(payload):
+            async for event in request.app.state.graph.astream(payload, config=config):
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:  # noqa: BLE001 — the stream is the only channel back
+            logger.exception("Analysis %s failed", analysis_id)
             yield f"data: {json.dumps({'error': str(exc), 'type': type(exc).__name__})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
