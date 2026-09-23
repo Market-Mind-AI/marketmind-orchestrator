@@ -374,3 +374,107 @@ def test_the_reference_market_collection_gets_its_own_line(monkeypatch) -> None:
     nome, resumo, _ = fatos[0]
     assert nome == "data_sources_reference_markets"
     assert "Google Ads (via DataForSEO): 1 fetched, 30 reused from the database" in resumo
+
+
+def test_a_match_that_barely_cleared_the_threshold_is_flagged(monkeypatch) -> None:
+    """Medido em produção em 23/09/2026: "cafetera italiana para espresso"
+    casou com "cafeteira italiana moka" em 41,0%, contra um corte de 40%. É uma
+    decisão de IDENTIDADE DE PRODUTO tirada por um fio, e nada mostrava isso."""
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_catalogo(
+        {"canonical_title": "cafeteira italiana moka", "catalog_method": "trigram", "catalog_match_score": 0.41}
+    )
+
+    _, resumo, detalhe = fatos[0]
+    assert "BORDERLINE" in resumo
+    assert "40% threshold" in resumo
+    assert detalhe["borderline"] is True
+
+
+def test_a_comfortable_match_is_not_flagged(monkeypatch) -> None:
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_catalogo(
+        {"canonical_title": "Picanha Swift", "catalog_method": "trigram", "catalog_match_score": 0.87}
+    )
+
+    _, resumo, detalhe = fatos[0]
+    assert "BORDERLINE" not in resumo
+    assert detalhe["borderline"] is False
+
+
+# --- a segunda passada sobre a narrativa (23/09/2026) -----------------------
+#
+# Medir não bastava. Uma execução com TODOS os números respaldados
+# (`hallucination_rate=0.0`, 0 de 134) afirmava mesmo assim que "os EUA não
+# fazem parte do ranking" e que "a Espanha é uma aposta de exportação mais
+# coerente" — a segunda os dados não podem sustentar de jeito nenhum, porque não
+# cobrem custo, tarifa nem exigência sanitária.
+#
+# O invariante do projeto é que o modelo nunca calcula um número, e é isso que
+# torna a checagem numérica exata. Ele nunca foi defesa contra inventar a
+# CONCLUSÃO.
+
+
+def _revisao(monkeypatch, *, revisada, claims_depois, scores=None):  # noqa: ANN001, ANN202
+    from unittest.mock import AsyncMock
+
+    client = AsyncMock()
+    client.revise_narrative = AsyncMock(return_value=revisada)
+    monkeypatch.setattr(nodes, "_client", lambda: client)
+    monkeypatch.setattr(
+        nodes.quality,
+        "judge_support",
+        AsyncMock(return_value=None if claims_depois is None else {"unsupported_claims": claims_depois}),
+    )
+    if scores is not None:
+        monkeypatch.setattr(
+            nodes.observability, "record", lambda nome, valor, *, comment=None: scores.append((nome, valor, comment))
+        )
+    return client
+
+
+async def test_a_revision_with_fewer_unsupported_claims_replaces_the_text(monkeypatch) -> None:
+    scores: list = []
+    client = _revisao(monkeypatch, revisada="Texto revisto", claims_depois=["uma só"], scores=scores)
+
+    await nodes._revise_narrative("a1", "Texto original", ["c1", "c2", "c3"], {})
+
+    client.attach_narrative.assert_awaited_once_with("a1", "Texto revisto")
+    assert ("narrative.revised", True, "unsupported claims 3 -> 1") in scores
+    assert any(n == "narrative.unsupported_claims_final" and v == 1.0 for n, v, _ in scores)
+
+
+async def test_a_revision_that_is_not_better_is_discarded(monkeypatch) -> None:
+    """Uma segunda chamada de modelo não pode piorar uma resposta que já foi
+    entregue. Igual não basta: só troca quem melhora."""
+    scores: list = []
+    client = _revisao(monkeypatch, revisada="Texto pior", claims_depois=["c1", "c2"], scores=scores)
+
+    await nodes._revise_narrative("a1", "Texto original", ["c1", "c2"], {})
+
+    client.attach_narrative.assert_not_awaited()
+    assert any(n == "narrative.revised" and v is False for n, v, _ in scores)
+
+
+async def test_a_revision_that_cannot_be_judged_is_not_trusted(monkeypatch) -> None:
+    """Sem segunda opinião não há como afirmar que melhorou, e trocar às cegas é
+    exatamente o risco que esta função existe para não correr."""
+    scores: list = []
+    client = _revisao(monkeypatch, revisada="Texto revisto", claims_depois=None, scores=scores)
+
+    await nodes._revise_narrative("a1", "Texto original", ["c1"], {})
+
+    client.attach_narrative.assert_not_awaited()
+    assert any(n == "narrative.revised" and v is False and "judged" in (c or "") for n, v, c in scores)
+
+
+async def test_a_revision_that_never_came_back_leaves_the_delivered_text(monkeypatch) -> None:
+    scores: list = []
+    client = _revisao(monkeypatch, revisada=None, claims_depois=["c1"], scores=scores)
+
+    await nodes._revise_narrative("a1", "Texto original", ["c1"], {})
+
+    client.attach_narrative.assert_not_awaited()
+    assert any(n == "narrative.revised" and v is False for n, v, _ in scores)

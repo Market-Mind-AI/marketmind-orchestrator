@@ -347,6 +347,15 @@ class ScoringClient:
         )
         return body.get("narrative")
 
+    async def revise_narrative(self, narrative: str, claims: list[str]) -> str | None:
+        """Reescreve o texto sem as afirmações que a evidência não sustenta.
+        Devolve None quando a revisão não saiu — o texto entregue continua
+        valendo."""
+        body = await self._call(
+            "POST", "/internal/narrate/revise", json={"narrative": narrative, "claims": claims}
+        )
+        return body.get("narrative")
+
 
 def _detail(response: httpx.Response) -> str:
     try:

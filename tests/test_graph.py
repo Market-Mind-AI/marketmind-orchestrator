@@ -358,3 +358,64 @@ async def test_a_run_that_gave_up_reports_the_same_five(core: AsyncMock, caplog)
     assert "run start -> given up" in caplog.text
     assert "QUALITY token_consumption=" in caplog.text
     assert "QUALITY tool_invocation_accuracy=" in caplog.text
+
+
+# --- o que uma execução inteira deposita no trace (23/09/2026) --------------
+
+
+async def test_every_measure_of_a_full_run_lands_inside_the_trace(core, monkeypatch) -> None:  # noqa: ANN001
+    """O teste que faltava, e a razão de faltar é o próprio defeito.
+
+    Em 23/09/2026 descobriu-se que as cinco métricas nunca tinham chegado ao
+    Langfuse: cada linha QUALITY era seguida de "No active span in current
+    context... will be skipped". Passavam em todo teste porque a linha do log
+    sai primeiro e incondicionalmente, e era nela que os testes batiam.
+
+    Os fatos falhavam de um jeito pior: `create_event` não descarta, cria um
+    TRACE RAIZ próprio — estariam no Langfuse, soltos da análise que os
+    produziu, presentes e inacháveis.
+
+    Por isso este teste não olha texto de log. Ele afirma que cada medição
+    aconteceu com um span ABERTO, que é a condição de chegar ao lugar certo.
+    """
+    from app import observability, quality
+
+    aberto = {"span": False}
+    registrados: list[tuple[str, str, bool]] = []
+
+    class _SpanFalso:
+        def __enter__(self):  # noqa: ANN204
+            aberto["span"] = True
+            return self
+
+        def __exit__(self, *_):  # noqa: ANN002, ANN204
+            aberto["span"] = False
+            return False
+
+    class _ClienteFalso:
+        def start_as_current_observation(self, **_):  # noqa: ANN003, ANN201
+            return _SpanFalso()
+
+        def create_event(self, *, name, output=None, metadata=None):  # noqa: ANN001, ANN201
+            registrados.append(("event", name, aberto["span"]))
+
+        def score_current_trace(self, **kwargs):  # noqa: ANN003, ANN201
+            registrados.append(("score", kwargs.get("name"), aberto["span"]))
+
+    monkeypatch.setattr(observability, "_handler", lambda: object())
+    monkeypatch.setattr("langfuse.get_client", lambda: _ClienteFalso())
+    monkeypatch.setattr(quality, "judge_support", AsyncMock(return_value=None))
+
+    # Exatamente o que public._run faz em produção.
+    with observability.run_span("analysis a1"):
+        await build_graph().ainvoke({"analysis_id": "a1"})
+
+    assert registrados, "uma execução inteira não depositou nada no trace"
+    fora = [nome for _, nome, dentro in registrados if not dentro]
+    assert not fora, f"chegaram sem span aberto e seriam descartados ou viravam trace solto: {fora}"
+
+    nomes = {nome for _, nome, _ in registrados}
+    assert {"catalog_resolution", "data_sources"} <= nomes, "os fatos têm de estar no trace"
+    assert {"task_completion_rate", "response_latency_seconds", "token_consumption"} <= nomes, (
+        "as cinco medidas são o que o trace existe para comparar entre execuções"
+    )

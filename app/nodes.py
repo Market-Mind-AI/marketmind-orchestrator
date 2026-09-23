@@ -78,6 +78,17 @@ async def start_node(state: dict) -> dict:
 # do catálogo — o trigram resolve 71 deles com precisão de 100%, e nos 18 que
 # sobram nenhuma distância de cosseno decide, porque a relação é conhecimento e
 # não proximidade de string. Ver a migration 027 do serviço de scoring.
+# O limiar do trigram no serviço de scoring (`catalog_trigram_similarity_threshold`).
+# Não é lido de lá porque este processo não tem essa configuração; é repetido
+# aqui de propósito e só para ROTULAR, nunca para decidir — quem decide é quem
+# tem o número.
+_LIMIAR_TRIGRAM = 0.4
+# Quão perto do limiar ainda é "quase não passou". Uma coincidência de 0,41
+# contra um corte de 0,40 é decisão de identidade de produto tirada por um fio,
+# e antes de 23/09/2026 nada mostrava isso. Medido no mesmo dia: "cafetera
+# italiana para espresso" casou com "cafeteira italiana moka" em 41,0%.
+_MARGEM_LIMIAR = 0.05
+
 _COINCIDENCIA = {
     "alias": ("exact", "an exact alias already pointed at it"),
     "trigram": ("spelling", "its name is spelled almost the same"),
@@ -123,10 +134,14 @@ def _note_catalogo(stored: dict[str, Any]) -> None:
     veredito = "REUSED the catalogue entry" if reaproveitou else "CREATED a new catalogue entry"
     alvo = f"{perguntado!r} -> {titulo!r}" if perguntado and perguntado != titulo else f"{titulo!r}"
     resumo = f"{alvo}: {veredito} — match by {tipo}, {explicacao}"
+    no_fio = False
     if score is not None:
         # Em porcentagem porque é assim que se lê "quanto coincidiu". O número
         # cru (0-1) fica no metadata para quem for comparar execuções.
         resumo += f" ({float(score) * 100:.1f}% similar)"
+        no_fio = float(score) < _LIMIAR_TRIGRAM + _MARGEM_LIMIAR
+        if no_fio:
+            resumo += f" — BORDERLINE, barely over the {_LIMIAR_TRIGRAM * 100:.0f}% threshold"
     if motivo:
         resumo += f' — "{motivo}"'
 
@@ -140,6 +155,9 @@ def _note_catalogo(stored: dict[str, Any]) -> None:
             "match_type": tipo,
             "method": metodo,
             "match_percent": None if score is None else round(float(score) * 100, 1),
+            # Vale por si: uma identidade decidida a um ponto do corte merece
+            # ser achável sem ninguém ter que comparar com o limiar na mão.
+            "borderline": no_fio,
             "match_score": None if score is None else float(score),
             "match_reasoning": motivo,
             "queried_text": perguntado,
@@ -617,7 +635,7 @@ async def narrate_node(state: dict) -> dict:
         )
         await core.attach_narrative(state["analysis_id"], narrative)
         await core.record_progress(state["analysis_id"], None)
-        await _check_narrative(narrative, packet)
+        await _check_narrative(narrative, packet, state["analysis_id"])
         return {"narrative": narrative}
     except (ScoringUnavailable, ScoringRejected) as exc:
         logger.exception("Analysis %s is delivered, but attaching its narrative failed", state["analysis_id"])
@@ -655,7 +673,59 @@ async def give_up_node(state: dict) -> dict:
 
 
 
-async def _check_narrative(narrative: str | None, packet: dict[str, Any]) -> None:
+async def _revise_narrative(
+    analysis_id: str, narrative: str, claims: list[str], packet: dict[str, Any]
+) -> None:
+    """Ask for the sentences to be rewritten, and only keep the rewrite if it
+    is actually better.
+
+    Measuring this was not enough. A run today had every figure supported
+    (`hallucination_rate=0.0`, 0 of 134) and still asserted that "the USA is
+    not part of the ranking" and that "Spain is the more coherent export bet" —
+    the second of which the data cannot support at all, covering no cost, no
+    tariff and no sanitary requirement. The project's invariant is that the
+    model never computes a number, and that is exactly what makes the numeric
+    check exact; it was never a defence against inventing the CONCLUSION.
+
+    The revision is judged by the same judge, and kept only if it says less
+    that is unsupported. A rewrite that makes it worse is discarded — a second
+    model call cannot be allowed to damage an answer already delivered.
+    """
+    revista = await _client().revise_narrative(narrative, claims)
+    if not revista:
+        observability.record("narrative.revised", False, comment="the revision did not come back")
+        return
+
+    novo_veredito = await quality.judge_support(revista, packet)
+    if novo_veredito is None:
+        # Sem segunda opinião não há como afirmar que melhorou, e trocar às
+        # cegas é exatamente o risco que esta função existe para não correr.
+        observability.record("narrative.revised", False, comment="the revision could not be judged")
+        return
+
+    restantes = [str(c) for c in (novo_veredito.get("unsupported_claims") or [])]
+    if len(restantes) >= len(claims):
+        observability.record(
+            "narrative.revised",
+            False,
+            comment=f"discarded: {len(restantes)} unsupported claims against the original's {len(claims)}",
+        )
+        return
+
+    await _client().attach_narrative(analysis_id, revista)
+    observability.record(
+        "narrative.revised",
+        True,
+        comment=f"unsupported claims {len(claims)} -> {len(restantes)}",
+    )
+    observability.record(
+        "narrative.unsupported_claims_final",
+        float(len(restantes)),
+        comment=("none" if not restantes else "; ".join(restantes)[:500]),
+    )
+
+
+async def _check_narrative(narrative: str | None, packet: dict[str, Any], analysis_id: str = "") -> None:
     """What the text claims, measured against what the evidence holds.
 
     Possible only because no number in the answer comes from a model: the
@@ -697,11 +767,13 @@ async def _check_narrative(narrative: str | None, packet: dict[str, Any]) -> Non
             # Already said why, in quality.judge_support. No score is recorded:
             # an absent judgement must not be readable as a clean one.
             return
-        claims = verdict.get("unsupported_claims") or []
+        claims = [str(c) for c in (verdict.get("unsupported_claims") or [])]
         observability.record(
             "narrative.unsupported_claims",
             float(len(claims)),
-            comment=("none" if not claims else "; ".join(str(c) for c in claims)[:500]),
+            comment=("none" if not claims else "; ".join(claims)[:500]),
         )
+        if claims:
+            await _revise_narrative(analysis_id, narrative, claims, packet)
     except Exception:  # noqa: BLE001 — a measurement must never break what it measures
         logger.exception("Could not check the narrative; the analysis is unaffected")
