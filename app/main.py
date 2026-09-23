@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app import observability, spend
-from app.checkpointer import open_checkpointer
+from app.checkpointer import open_checkpointer, open_store
 from app.config import get_settings
 from app.graph import build_graph, set_graph
 from app.observability import callbacks, tracing_enabled
@@ -26,9 +26,11 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # The checkpointer holds a connection pool, so it lives as long as the
-    # application does and the graph is compiled around it once.
-    async with open_checkpointer() as checkpointer:
-        app.state.graph = build_graph(checkpointer)
+    # application does and the graph is compiled around it once. The store
+    # rides alongside it, opened from the same connection: the agent's memory
+    # of past runs is meant to live exactly as long as its memory of this one.
+    async with open_checkpointer() as checkpointer, open_store() as store:
+        app.state.graph = build_graph(checkpointer, store)
         # Also parked at module level: a run started by POST /analyze outlives
         # the request that asked for it and cannot read app.state.
         set_graph(app.state.graph)
