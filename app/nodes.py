@@ -78,17 +78,6 @@ async def start_node(state: dict) -> dict:
 # do catálogo — o trigram resolve 71 deles com precisão de 100%, e nos 18 que
 # sobram nenhuma distância de cosseno decide, porque a relação é conhecimento e
 # não proximidade de string. Ver a migration 027 do serviço de scoring.
-# O limiar do trigram no serviço de scoring (`catalog_trigram_similarity_threshold`).
-# Não é lido de lá porque este processo não tem essa configuração; é repetido
-# aqui de propósito e só para ROTULAR, nunca para decidir — quem decide é quem
-# tem o número.
-_LIMIAR_TRIGRAM = 0.4
-# Quão perto do limiar ainda é "quase não passou". Uma coincidência de 0,41
-# contra um corte de 0,40 é decisão de identidade de produto tirada por um fio,
-# e antes de 23/09/2026 nada mostrava isso. Medido no mesmo dia: "cafetera
-# italiana para espresso" casou com "cafeteira italiana moka" em 41,0%.
-_MARGEM_LIMIAR = 0.05
-
 _COINCIDENCIA = {
     "alias": ("exact", "an exact alias already pointed at it"),
     "trigram": ("spelling", "its name is spelled almost the same"),
@@ -134,14 +123,17 @@ def _note_catalogo(stored: dict[str, Any]) -> None:
     veredito = "REUSED the catalogue entry" if reaproveitou else "CREATED a new catalogue entry"
     alvo = f"{perguntado!r} -> {titulo!r}" if perguntado and perguntado != titulo else f"{titulo!r}"
     resumo = f"{alvo}: {veredito} — match by {tipo}, {explicacao}"
-    no_fio = False
+    # Quem diz é o serviço que tem o limiar. Este processo chegou a repetir o
+    # 0.4 só para rotular, e número repetido envelhece sozinho: mudar o limiar
+    # lá deixaria o rótulo daqui mentindo sem nada acusar. Uma coincidência de
+    # 41% contra um corte de 40% é identidade de produto decidida por um fio.
+    no_fio = bool(stored.get("catalog_match_borderline"))
     if score is not None:
         # Em porcentagem porque é assim que se lê "quanto coincidiu". O número
         # cru (0-1) fica no metadata para quem for comparar execuções.
         resumo += f" ({float(score) * 100:.1f}% similar)"
-        no_fio = float(score) < _LIMIAR_TRIGRAM + _MARGEM_LIMIAR
         if no_fio:
-            resumo += f" — BORDERLINE, barely over the {_LIMIAR_TRIGRAM * 100:.0f}% threshold"
+            resumo += " — BORDERLINE, barely over the catalogue's similarity threshold"
     if motivo:
         resumo += f' — "{motivo}"'
 

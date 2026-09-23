@@ -383,12 +383,18 @@ def test_a_match_that_barely_cleared_the_threshold_is_flagged(monkeypatch) -> No
     fatos = _fatos(monkeypatch)
 
     nodes._note_catalogo(
-        {"canonical_title": "cafeteira italiana moka", "catalog_method": "trigram", "catalog_match_score": 0.41}
+        {
+            "canonical_title": "cafeteira italiana moka",
+            "catalog_method": "trigram",
+            "catalog_match_score": 0.41,
+            # Quem diz é o scoring, que é onde o limiar mora.
+            "catalog_match_borderline": True,
+        }
     )
 
     _, resumo, detalhe = fatos[0]
     assert "BORDERLINE" in resumo
-    assert "40% threshold" in resumo
+    assert "similarity threshold" in resumo
     assert detalhe["borderline"] is True
 
 
