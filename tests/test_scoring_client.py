@@ -225,3 +225,23 @@ def test_a_call_outside_a_run_carries_no_trace() -> None:
     from app.scoring_client import ScoringClient
 
     assert "traceparent" not in ScoringClient(base_url="http://core", token="t").headers()
+
+
+async def test_a_timeout_says_it_timed_out(monkeypatch) -> None:
+    """httpx's timeout exceptions carry an EMPTY str(), so the message read
+    "POST /internal/coverage/ensure failed: " and named nothing. A World Bank
+    call that hung for ten minutes reached the log as that blank line, and the
+    cause had to be found in another service's logs."""
+    from app.scoring_client import ScoringClient, ScoringUnavailable
+
+    async def _timeout(*args, **kwargs):
+        raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", _timeout)
+    client = ScoringClient(base_url="http://core", token="t")
+
+    with pytest.raises(ScoringUnavailable) as caught:
+        await client._call("POST", "/internal/coverage/ensure")
+
+    assert "ReadTimeout" in str(caught.value)
+    assert str(caught.value).strip().endswith("ReadTimeout")
