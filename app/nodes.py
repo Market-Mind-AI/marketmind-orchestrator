@@ -158,6 +158,8 @@ async def collect_node(state: dict) -> dict:
 
     tasks: list[dict[str, Any]] = []
     collected: list[str] = []
+    reaproveitado: dict[str, int] = {}
+    sem_cobertura: dict[str, list[str]] = {}
     for country in state["countries"]:
         await core.record_progress(analysis_id, f"collecting {country}")
         try:
@@ -175,6 +177,13 @@ async def collect_node(state: dict) -> dict:
                 answer.get("category_terms"),
             )
             tasks.extend(answer.get("tasks", []))
+            # O outro lado da conta, que as tarefas não contam: o que já estava
+            # no banco nem vira tarefa. Sem isto uma fonte inteiramente
+            # aproveitada some do relato.
+            for fonte, quantos in (answer.get("reused") or {}).items():
+                reaproveitado[fonte] = reaproveitado.get(fonte, 0) + quantos
+            for fonte in answer.get("not_covering") or []:
+                sem_cobertura.setdefault(fonte, []).append(country)
             collected.append(country)
         except ScoringUnavailable as exc:
             # Transient by definition. Recorded, not raised: one country's
@@ -182,7 +191,7 @@ async def collect_node(state: dict) -> dict:
             logger.warning("Collection for %s could not run: %s", country, exc)
             tasks.append({"country": country, "status": "failed", "error_message": str(exc)})
 
-    _note_fontes(tasks)
+    _note_fontes(tasks, reused=reaproveitado, not_covering=sem_cobertura)
     return {"coverage_tasks": tasks, "countries_collected": collected}
 
 
@@ -195,73 +204,83 @@ _FONTES = {
 }
 
 
-def _note_fontes(tasks: list[dict[str, Any]]) -> None:
-    """Say, per source, what was actually downloaded and what was already here.
+def _note_fontes(
+    tasks: list[dict[str, Any]],
+    *,
+    reused: dict[str, int] | None = None,
+    not_covering: dict[str, list[str]] | None = None,
+) -> None:
+    """Say, for EACH of the four sources, what was downloaded and what was
+    already here.
 
-    `skipped` is the whole point: it means the datum was in the database, still
-    inside its freshness window, and nothing was requested from the source. A
-    run that reuses everything and a run that downloads everything take very
-    different amounts of time and money and produce the same shaped answer, so
-    without this the difference is invisible — which is how the reference
-    candidates spent months being re-downloaded on every single analysis.
+    Each of the four is named every time, even when it did nothing, because a
+    source that is silently absent from the line is indistinguishable from one
+    that was never consulted — which is the very question the line exists to
+    answer. The first version only counted tasks, and a source whose data was
+    entirely fresh produces no task at all: the first real run said only
+    "Google Ads: 2 fetched" and said nothing whatsoever about the World Bank,
+    the OECD or UN Data, which had supplied every macro indicator from the
+    database.
+
+    Three different silences, told apart:
+      reused        the datum was here, inside its freshness window, and
+                    nothing was asked of the source. This is the good case and
+                    the expensive one to confuse with the others.
+      not covering  the source does not have this country at all — read from
+                    the country's own mapping, not from a hand-kept list.
+      nothing       no indicator of this analysis comes from that source.
     """
+    reused = reused or {}
+    not_covering = not_covering or {}
+
     por_fonte: dict[str, dict[str, int]] = {}
+    sem_fonte = 0
     for task in tasks:
         fonte = task.get("source")
         if not fonte:
+            # `collect_node` fabrica isto quando o scoring nem respondeu: não há
+            # fonte porque não se chegou a nenhuma.
+            sem_fonte += 1
             continue
-        contagem = por_fonte.setdefault(fonte, {"fetched": 0, "reused": 0, "failed": 0})
-        status = task.get("status")
-        if status == "skipped":
-            contagem["reused"] += 1
-        elif status == "failed":
+        contagem = por_fonte.setdefault(fonte, {"fetched": 0, "failed": 0})
+        if task.get("status") == "failed":
             contagem["failed"] += 1
         else:
             contagem["fetched"] += 1
 
-    if not por_fonte:
-        # Sem fonte em nenhuma tarefa há dois casos opostos, e dizer o errado é
-        # pior que não dizer nada. Lista vazia: nada precisou ser coletado.
-        # Lista com tarefas mas sem fonte: são as falhas que `collect_node`
-        # fabrica quando o serviço de scoring nem respondeu — aí NADA foi
-        # coletado nem reaproveitado, e chamar isso de "já estava no banco"
-        # seria relatar sucesso onde houve queda.
-        if tasks:
-            observability.note(
-                "data_sources",
-                summary=f"no source was reached at all: {len(tasks)} collection(s) could not even run",
-                detail={"unreachable": tasks[:5]},
-            )
-        else:
-            observability.note(
-                "data_sources",
-                summary="nothing was asked of any source: every indicator was already in the database",
-                detail={},
-            )
-        return
-
     partes = []
-    for fonte in sorted(por_fonte):
-        c = por_fonte[fonte]
-        nome = _FONTES.get(fonte, fonte)
-        pedaco = f"{nome}: {c['fetched']} fetched, {c['reused']} reused from the database"
-        if c["failed"]:
-            pedaco += f", {c['failed']} failed"
+    detalhe: dict[str, Any] = {}
+    for fonte, nome in _FONTES.items():
+        c = por_fonte.get(fonte, {"fetched": 0, "failed": 0})
+        aproveitados = reused.get(fonte, 0)
+        paises_sem = not_covering.get(fonte, [])
+        detalhe[fonte] = {"fetched": c["fetched"], "reused": aproveitados, "failed": c["failed"]}
+
+        if c["fetched"] or aproveitados or c["failed"]:
+            pedaco = f"{nome}: {c['fetched']} fetched, {aproveitados} reused from the database"
+            if c["failed"]:
+                pedaco += f", {c['failed']} failed"
+        elif paises_sem:
+            pedaco = f"{nome}: does not cover {', '.join(paises_sem)}"
+            detalhe[fonte]["not_covering"] = paises_sem
+        else:
+            pedaco = f"{nome}: nothing needed from it"
         partes.append(pedaco)
 
+    if sem_fonte:
+        partes.append(f"{sem_fonte} collection(s) could not even run — the scoring service did not answer")
+        detalhe["unreachable"] = sem_fonte
+
     total_buscado = sum(c["fetched"] for c in por_fonte.values())
-    observability.note(
-        "data_sources",
-        summary=" | ".join(partes),
-        detail={"by_source": por_fonte, "fetched_total": total_buscado},
-    )
+    total_aproveitado = sum(reused.values())
+    observability.note("data_sources", summary=" | ".join(partes), detail=detalhe)
     # Também como número, que é o que dá para comparar entre execuções: uma
     # análise que de repente baixa tudo de novo aparece como uma subida aqui,
     # sem ninguém precisar abrir o trace.
     observability.record(
         "indicators_fetched",
         total_buscado,
-        comment="indicators downloaded from a source; the rest were already in the database",
+        comment=f"downloaded from a source; {total_aproveitado} more were already in the database",
     )
 
 

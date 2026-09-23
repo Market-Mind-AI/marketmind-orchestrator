@@ -159,37 +159,73 @@ def _fatos(monkeypatch) -> list[tuple[str, str, dict]]:
     return capturados
 
 
-def test_the_trace_says_which_sources_were_read_and_which_were_not(monkeypatch) -> None:
-    """A diferença entre uma análise cara e uma barata não aparece no resultado:
-    as duas têm a mesma forma. `skipped` é o dado que já estava no banco, dentro
-    do prazo, sem nada pedido à fonte."""
+def test_every_source_is_named_even_when_it_did_nothing(monkeypatch) -> None:
+    """A regressão que motivou o formato, medida em 23/09/2026: a primeira
+    execução real relatou só "Google Ads: 2 fetched" e não disse uma palavra
+    sobre World Bank, OECD e UN Data — que tinham servido TODOS os indicadores
+    macro a partir do banco. Dado fresco não vira tarefa, e a versão anterior
+    só contava tarefas. Sumir da linha é indistinguível de não ter sido
+    consultado, que é justamente o que a linha existe para responder."""
     fatos = _fatos(monkeypatch)
 
     nodes._note_fontes(
-        [
-            {"source": "worldbank", "status": "skipped"},
-            {"source": "worldbank", "status": "skipped"},
-            {"source": "oecd", "status": "done"},
-            {"source": "pytrends", "status": "failed"},
-        ]
+        [{"source": "pytrends", "status": "done"}, {"source": "pytrends", "status": "done"}],
+        reused={"worldbank": 12, "oecd": 6, "undata": 4},
     )
 
-    nome, resumo, detalhe = fatos[0]
-    assert nome == "data_sources"
-    assert "World Bank: 0 fetched, 2 reused from the database" in resumo
-    assert "OECD: 1 fetched, 0 reused" in resumo
-    assert "1 failed" in resumo
-    assert detalhe["by_source"]["worldbank"] == {"fetched": 0, "reused": 2, "failed": 0}
-    assert detalhe["fetched_total"] == 1
+    _, resumo, detalhe = fatos[0]
+    assert "World Bank: 0 fetched, 12 reused from the database" in resumo
+    assert "OECD: 0 fetched, 6 reused" in resumo
+    assert "UN Data: 0 fetched, 4 reused" in resumo
+    assert "Google Ads (via DataForSEO): 2 fetched, 0 reused" in resumo
+    assert detalhe["worldbank"] == {"fetched": 0, "reused": 12, "failed": 0}
 
 
-def test_an_analysis_that_downloaded_nothing_says_so(monkeypatch) -> None:
-    """O caso que mais importa ver e que produz silêncio: tudo já estava aqui."""
+def test_a_source_that_does_not_cover_the_country_says_so(monkeypatch) -> None:
+    """"Não cobre este país" é uma resposta, e é diferente de "não precisei
+    dela". A OCDE não publica preço imobiliário para Argentina e Peru, e isso
+    se lê do mapeamento do país, não de uma lista mantida à mão."""
     fatos = _fatos(monkeypatch)
 
-    nodes._note_fontes([])
+    nodes._note_fontes([], reused={"worldbank": 12}, not_covering={"oecd": ["ARG", "PER"]})
 
-    assert "nothing was asked of any source" in fatos[0][1]
+    _, resumo, detalhe = fatos[0]
+    assert "OECD: does not cover ARG, PER" in resumo
+    assert detalhe["oecd"]["not_covering"] == ["ARG", "PER"]
+
+
+def test_a_source_nothing_was_needed_from_is_distinguished_from_the_others(monkeypatch) -> None:
+    """Três silêncios diferentes, e confundi-los custa caro: aproveitado do
+    banco, não cobre o país, e nada desta análise vem dessa fonte."""
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_fontes([], reused={"worldbank": 12})
+
+    resumo = fatos[0][1]
+    assert "World Bank: 0 fetched, 12 reused" in resumo
+    assert "OECD: nothing needed from it" in resumo
+
+
+def test_a_failed_collection_is_counted_against_its_own_source(monkeypatch) -> None:
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_fontes([{"source": "undata", "status": "failed"}], reused={})
+
+    resumo = fatos[0][1]
+    assert "UN Data: 0 fetched, 0 reused from the database, 1 failed" in resumo
+
+
+def test_a_scoring_service_that_never_answered_is_not_called_a_cache_hit(monkeypatch) -> None:
+    """`collect_node` fabrica uma tarefa sem fonte quando o scoring nem
+    respondeu. Contar isso como reaproveitamento é relatar sucesso onde houve
+    queda — e a queda é justamente o que alguém abre o trace para encontrar."""
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_fontes([{"country": "BRA", "status": "failed", "error_message": "connection refused"}])
+
+    resumo = fatos[0][1]
+    assert "could not even run" in resumo
+    assert "the scoring service did not answer" in resumo
 
 
 def test_the_trace_names_the_catalogue_entry_that_was_reused(monkeypatch) -> None:
@@ -234,16 +270,3 @@ def test_an_analysis_from_before_the_field_existed_says_it_does_not_know(monkeyp
     nodes._note_catalogo({"canonical_title": "Air Fryer", "catalog_method": None})
 
     assert "was not recorded" in fatos[0][1]
-
-
-def test_a_scoring_service_that_never_answered_is_not_called_a_cache_hit(monkeypatch) -> None:
-    """`collect_node` fabrica uma tarefa sem fonte quando o scoring nem
-    respondeu. Contar isso como "nada foi pedido porque tudo já estava no
-    banco" é relatar sucesso onde houve queda — e a queda é justamente o que
-    alguém abre o trace para encontrar."""
-    fatos = _fatos(monkeypatch)
-
-    nodes._note_fontes([{"country": "BRA", "status": "failed", "error_message": "connection refused"}])
-
-    assert "no source was reached at all" in fatos[0][1]
-    assert "already in the database" not in fatos[0][1]
