@@ -1,5 +1,13 @@
 # MarketMind Orchestrator - Design Spec
 
+> **A direção da chamada inverteu (nota de 23/09/2026).** A seção 4 descreve o `marketmind-core`
+> invocando o orquestrador e repassando o SSE ao frontend. É o contrário do que está no ar desde
+> 21/09/2026: **o orquestrador é a porta de entrada** — o frontend fala com ele em `/api`, e é ele que
+> chama o serviço de método, renomeado de `marketmind-core` para `marketmind-scoring`, pelas rotas
+> `/internal`. A spec fica como está porque é o desenho de origem; o que vale hoje está no
+> `README.md` deste repositório.
+
+
 ## 1. Overview
 The `marketmind-orchestrator` is a dedicated, stateless, cloud-agnostic microservice responsible for orchestrating the MarketMind analysis pipeline. It executes a LangGraph `StateGraph` (DAG) that integrates vision attribute extraction, parallel data enrichment, deterministic Market Opportunity Score (MOS) calculation, and LLM-based narrative generation.
 
