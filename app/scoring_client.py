@@ -44,6 +44,18 @@ class ScoringRejected(ScoringError):
         self.detail = detail
 
 
+def _why(exc: BaseException) -> str:
+    """What went wrong, in words, even when the exception has none.
+
+    httpx raises its timeouts with an EMPTY message, so a report built from
+    `str(exc)` alone ended at the colon: "POST /internal/coverage/ensure
+    failed: ". A World Bank call that hung for ten minutes reached the log as
+    that blank line, and finding the cause meant reading another service's
+    logs. When the exception says nothing, its class name is the fact.
+    """
+    return str(exc) or type(exc).__name__
+
+
 class ScoringClient:
     def __init__(self, base_url: str | None = None, token: str | None = None) -> None:
         settings = get_settings()
@@ -78,7 +90,7 @@ class ScoringClient:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 response = await client.request(method, url, json=json, headers=self._headers())
         except httpx.HTTPError as exc:
-            raise ScoringUnavailable(f"{method} {path} failed: {exc}") from exc
+            raise ScoringUnavailable(f"{method} {path} failed: {_why(exc)}") from exc
 
         # Before the status check: a call that failed still burned the tokens it
         # burned before failing, and a run that retries three times has to
