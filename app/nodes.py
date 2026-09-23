@@ -160,6 +160,7 @@ async def collect_node(state: dict) -> dict:
     collected: list[str] = []
     reaproveitado: dict[str, int] = {}
     sem_cobertura: dict[str, list[str]] = {}
+    relacionadas_frescas = 0
     for country in state["countries"]:
         await core.record_progress(analysis_id, f"collecting {country}")
         try:
@@ -184,6 +185,8 @@ async def collect_node(state: dict) -> dict:
                 reaproveitado[fonte] = reaproveitado.get(fonte, 0) + quantos
             for fonte in answer.get("not_covering") or []:
                 sem_cobertura.setdefault(fonte, []).append(country)
+            if answer.get("related_fresh"):
+                relacionadas_frescas += 1
             collected.append(country)
         except ScoringUnavailable as exc:
             # Transient by definition. Recorded, not raised: one country's
@@ -191,7 +194,9 @@ async def collect_node(state: dict) -> dict:
             logger.warning("Collection for %s could not run: %s", country, exc)
             tasks.append({"country": country, "status": "failed", "error_message": str(exc)})
 
-    _note_fontes(tasks, reused=reaproveitado, not_covering=sem_cobertura)
+    _note_fontes(
+        tasks, reused=reaproveitado, not_covering=sem_cobertura, related_fresh=relacionadas_frescas
+    )
     return {"coverage_tasks": tasks, "countries_collected": collected}
 
 
@@ -209,6 +214,7 @@ def _note_fontes(
     *,
     reused: dict[str, int] | None = None,
     not_covering: dict[str, list[str]] | None = None,
+    related_fresh: int = 0,
 ) -> None:
     """Say, for EACH of the four sources, what was downloaded and what was
     already here.
@@ -260,9 +266,17 @@ def _note_fontes(
             pedaco = f"{nome}: {c['fetched']} fetched, {aproveitados} reused from the database"
             if c["failed"]:
                 pedaco += f", {c['failed']} failed"
+            if fonte == "pytrends" and related_fresh:
+                # Contado à parte: é UM conjunto de sementes por país, não N
+                # termos. Somar os dois numa contagem só misturaria unidades.
+                pedaco += f" (+ related keywords already stored for {related_fresh} country/ies)"
+                detalhe[fonte]["related_reused_countries"] = related_fresh
         elif paises_sem:
             pedaco = f"{nome}: does not cover {', '.join(paises_sem)}"
             detalhe[fonte]["not_covering"] = paises_sem
+        elif fonte == "pytrends" and related_fresh:
+            pedaco = f"{nome}: nothing fetched — every search term and related keyword was already stored"
+            detalhe[fonte]["related_reused_countries"] = related_fresh
         else:
             pedaco = f"{nome}: nothing needed from it"
         partes.append(pedaco)

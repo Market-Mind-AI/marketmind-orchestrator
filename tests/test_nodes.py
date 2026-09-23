@@ -270,3 +270,17 @@ def test_an_analysis_from_before_the_field_existed_says_it_does_not_know(monkeyp
     nodes._note_catalogo({"canonical_title": "Air Fryer", "catalog_method": None})
 
     assert "was not recorded" in fatos[0][1]
+
+
+def test_demand_that_was_entirely_in_the_database_is_not_called_unneeded(monkeypatch) -> None:
+    """Medido em 23/09/2026, na segunda execução real: a linha dizia "Google
+    Ads: nothing needed from it" quando a verdade era que TODOS os termos e as
+    palavras relacionadas já estavam guardados e dentro dos 30 dias. Isso é
+    reaproveitamento — o caso que custa dinheiro confundir — e não ausência."""
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_fontes([], reused={"worldbank": 24}, related_fresh=2)
+
+    resumo = fatos[0][1]
+    assert "nothing fetched — every search term and related keyword was already stored" in resumo
+    assert "nothing needed from it" not in resumo.split("Google Ads")[1]
