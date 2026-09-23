@@ -243,6 +243,7 @@ def _note_fontes(
     reused: dict[str, int] | None = None,
     not_covering: dict[str, list[str]] | None = None,
     related_fresh: int = 0,
+    nome: str = "data_sources",
 ) -> None:
     """Say, for EACH of the four sources, what was downloaded and what was
     already here.
@@ -284,14 +285,14 @@ def _note_fontes(
 
     partes = []
     detalhe: dict[str, Any] = {}
-    for fonte, nome in _FONTES.items():
+    for fonte, rotulo in _FONTES.items():
         c = por_fonte.get(fonte, {"fetched": 0, "failed": 0})
         aproveitados = reused.get(fonte, 0)
         paises_sem = not_covering.get(fonte, [])
         detalhe[fonte] = {"fetched": c["fetched"], "reused": aproveitados, "failed": c["failed"]}
 
         if c["fetched"] or aproveitados or c["failed"]:
-            pedaco = f"{nome}: {c['fetched']} fetched, {aproveitados} reused from the database"
+            pedaco = f"{rotulo}: {c['fetched']} fetched, {aproveitados} reused from the database"
             if c["failed"]:
                 pedaco += f", {c['failed']} failed"
             if fonte == "pytrends" and related_fresh:
@@ -300,13 +301,13 @@ def _note_fontes(
                 pedaco += f" (+ related keywords already stored for {related_fresh} country/ies)"
                 detalhe[fonte]["related_reused_countries"] = related_fresh
         elif paises_sem:
-            pedaco = f"{nome}: does not cover {', '.join(paises_sem)}"
+            pedaco = f"{rotulo}: does not cover {', '.join(paises_sem)}"
             detalhe[fonte]["not_covering"] = paises_sem
         elif fonte == "pytrends" and related_fresh:
-            pedaco = f"{nome}: nothing fetched — every search term and related keyword was already stored"
+            pedaco = f"{rotulo}: nothing fetched — every search term and related keyword was already stored"
             detalhe[fonte]["related_reused_countries"] = related_fresh
         else:
-            pedaco = f"{nome}: nothing needed from it"
+            pedaco = f"{rotulo}: nothing needed from it"
         partes.append(pedaco)
 
     if sem_fonte:
@@ -315,12 +316,12 @@ def _note_fontes(
 
     total_buscado = sum(c["fetched"] for c in por_fonte.values())
     total_aproveitado = sum(reused.values())
-    observability.note("data_sources", summary=" | ".join(partes), detail=detalhe)
+    observability.note(nome, summary=" | ".join(partes), detail=detalhe)
     # Também como número, que é o que dá para comparar entre execuções: uma
     # análise que de repente baixa tudo de novo aparece como uma subida aqui,
     # sem ninguém precisar abrir o trace.
     observability.record(
-        "indicators_fetched",
+        f"{nome}.fetched",
         total_buscado,
         comment=f"downloaded from a source; {total_aproveitado} more were already in the database",
     )
@@ -342,6 +343,27 @@ async def ruler_node(state: dict) -> dict:
     core = _client()
     await core.record_progress(state["analysis_id"], "settling the demand ruler")
     known = await core.candidates_coverage(entity_key, state["countries"], state["period_key"])
+    # O passo mais caro do sistema, e até 23/09/2026 o único sem relato nenhum:
+    # a coleta dos mercados de referência não devolvia nada, então nem o custo
+    # nem o reaproveitamento dela apareciam em lugar algum. Fato próprio, e não
+    # somado ao da coleta dos países pedidos, porque é outra decisão: aqui se
+    # coleta país que NINGUÉM pediu, para a régua não mudar com a pergunta.
+    if known.get("champion_cached"):
+        observability.note(
+            "data_sources_reference_markets",
+            summary=(
+                "skipped entirely: this period's champion is already known, and "
+                "re-collecting the reference markets produces the same answer"
+            ),
+            detail={"champion_cached": True, "champion_country": known.get("champion_country")},
+        )
+    else:
+        _note_fontes(
+            known.get("tasks") or [],
+            reused=known.get("reused") or {},
+            related_fresh=int(known.get("related_fresh") or 0),
+            nome="data_sources_reference_markets",
+        )
     ceiling, ruler = await core.demand_ceiling(entity_key, state["countries"], state["period_key"])
     return {
         "champion_cached": bool(known.get("champion_cached")),

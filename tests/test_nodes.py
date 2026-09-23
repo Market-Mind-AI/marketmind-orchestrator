@@ -354,3 +354,23 @@ def test_the_same_text_on_both_sides_is_not_repeated(monkeypatch) -> None:
     nodes._note_catalogo({"canonical_title": "picanha", "catalog_query_text": "picanha", "catalog_method": "alias"})
 
     assert "->" not in fatos[0][1]
+
+
+def test_the_reference_market_collection_gets_its_own_line(monkeypatch) -> None:
+    """O passo mais caro do sistema, e até 23/09/2026 o único sem relato: três
+    análises seguidas de um produto levaram 594s, 203s e 396s, quase todo o
+    repetido sendo trabalho de candidato refeito. Linha própria e não somada à
+    dos países pedidos, porque é outra decisão — aqui se coleta país que
+    ninguém pediu, para a régua não mudar com a pergunta."""
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_fontes(
+        [{"source": "pytrends", "status": "done"}],
+        reused={"pytrends": 30},
+        related_fresh=1,
+        nome="data_sources_reference_markets",
+    )
+
+    nome, resumo, _ = fatos[0]
+    assert nome == "data_sources_reference_markets"
+    assert "Google Ads (via DataForSEO): 1 fetched, 30 reused from the database" in resumo
