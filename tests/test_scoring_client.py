@@ -195,3 +195,33 @@ async def test_a_call_that_failed_still_reports_what_it_burned() -> None:
             await _client()._call("POST", "/internal/analyses/r1/enrich-terms")
 
     assert spent.total_tokens == 900
+
+
+def test_a_call_made_during_a_run_carries_the_runs_trace(monkeypatch) -> None:
+    """So the model calls it causes in the scoring service land inside the run's
+    trace, under the run's `analysis` span, instead of in traces of their own."""
+    from langfuse import Langfuse
+
+    from app import observability
+    from app.scoring_client import ScoringClient
+
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    monkeypatch.setenv("LANGFUSE_HOST", "http://localhost:3000")
+    observability._handler.cache_clear()
+    analysis_id = "a8c5d38b-db60-413c-b8f3-086a0befb83a"
+
+    try:
+        with observability.run_span(f"analysis {analysis_id}", seed=analysis_id):
+            headers = ScoringClient(base_url="http://core", token="t").headers()
+    finally:
+        observability._handler.cache_clear()
+
+    assert headers["X-Internal-Token"] == "t"
+    assert headers["traceparent"].split("-")[1] == Langfuse.create_trace_id(seed=analysis_id)
+
+
+def test_a_call_outside_a_run_carries_no_trace() -> None:
+    from app.scoring_client import ScoringClient
+
+    assert "traceparent" not in ScoringClient(base_url="http://core", token="t").headers()

@@ -17,6 +17,7 @@ unknown entity, a missing token -- and retrying it just repeats the answer.
 from typing import Any
 
 import httpx
+from opentelemetry.propagate import inject
 
 from app import spend
 from app.config import get_settings
@@ -54,14 +55,22 @@ class ScoringClient:
         return self._base_url
 
     def headers(self) -> dict[str, str]:
-        """The auth header, for a caller that streams instead of using _call."""
+        """The auth header, for a caller that streams instead of using _call.
+
+        Also carries the run's trace context (`traceparent`) when called during
+        a run, so the model calls it causes land inside that trace too."""
         return self._headers()
 
     def _headers(self) -> dict[str, str]:
         # An absent token is not sent as an empty one: the service answers 401
         # either way, and a header that is present but empty reads like a
         # configuration that was attempted rather than one that was never made.
-        return {"X-Internal-Token": self._token} if self._token else {}
+        headers = {"X-Internal-Token": self._token} if self._token else {}
+        # The run's trace, so the model calls this request causes in the scoring
+        # service land inside it. Outside a run nothing is current and nothing
+        # is added.
+        inject(headers)
+        return headers
 
     async def _call(self, method: str, path: str, *, json: dict[str, Any] | None = None) -> Any:
         url = f"{self._base_url}{path}"

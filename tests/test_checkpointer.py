@@ -1,6 +1,6 @@
 import pytest
 
-from app.checkpointer import CheckpointerNotConfigured, open_checkpointer
+from app.checkpointer import CheckpointerNotConfigured, open_checkpointer, open_store
 from app.config import get_settings
 
 
@@ -10,6 +10,37 @@ async def test_memory_has_to_be_asked_for_by_name(monkeypatch: pytest.MonkeyPatc
 
     async with open_checkpointer() as checkpointer:
         assert checkpointer.__class__.__name__ == "InMemorySaver"
+
+
+# --- the store: the same switch, read as a pair with the checkpointer ---
+
+
+async def test_the_store_follows_the_same_memory_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHECKPOINTER", "memory")
+
+    async with open_store() as store:
+        assert store.__class__.__name__ == "InMemoryStore"
+
+
+async def test_the_store_refuses_postgres_without_a_connection_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The checkpointer already fails at startup for this. The store shares its
+    settings, so it must fail the same way rather than compiling a graph with
+    durable runs and silently no memory."""
+    monkeypatch.setenv("CHECKPOINTER", "postgres")
+    for name in ("CHECKPOINTER_DATABASE_URL", "CHECKPOINTER_DB_HOST", "CHECKPOINTER_DB_NAME", "CHECKPOINTER_DB_USER"):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(CheckpointerNotConfigured):
+        async with open_store():
+            pass
+
+
+async def test_the_store_rejects_the_same_unknown_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHECKPOINTER", "redis")
+
+    with pytest.raises(CheckpointerNotConfigured):
+        async with open_store():
+            pass
 
 
 async def test_postgres_without_a_connection_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
