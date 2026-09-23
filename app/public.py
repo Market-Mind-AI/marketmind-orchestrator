@@ -106,6 +106,12 @@ async def analyze(payload: dict[str, Any]) -> dict[str, Any]:
         registered = await core.register_analysis(
             entity_key=resolved["entity_key"],
             canonical_title=resolved["canonical_title"],
+            # Como o catálogo chegou nesta entidade, guardado com a análise.
+            # Aqui ainda não há trace do Langfuse — ele nasce quando o grafo
+            # roda, adiante — e uma retomada nunca repete esta resolução. Sem
+            # gravar, o fato se perde nos dois casos.
+            catalog_method=resolved.get("method"),
+            catalog_match_score=resolved.get("match_score"),
             countries=countries_asked,
             estimated_price=payload.get("estimated_price"),
             price_currency=payload.get("price_currency"),

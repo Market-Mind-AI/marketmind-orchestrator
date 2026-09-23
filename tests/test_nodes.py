@@ -142,3 +142,95 @@ async def test_a_fresh_run_decides_the_period_and_the_deadline(monkeypatch: pyte
     assert started["period_key"] == nodes._period_key()
     assert started["deadline_at"] is not None
     assert started["attempts"] == 0
+
+
+# --- o que o trace passa a dizer (23/09/2026) -------------------------------
+
+
+def _fatos(monkeypatch) -> list[tuple[str, str, dict]]:
+    """Captura o que seria anexado ao trace, sem precisar de um."""
+    capturados: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        nodes.observability,
+        "note",
+        lambda nome, *, summary, detail=None: capturados.append((nome, summary, detail or {})),
+    )
+    monkeypatch.setattr(nodes.observability, "record", lambda *a, **k: None)
+    return capturados
+
+
+def test_the_trace_says_which_sources_were_read_and_which_were_not(monkeypatch) -> None:
+    """A diferença entre uma análise cara e uma barata não aparece no resultado:
+    as duas têm a mesma forma. `skipped` é o dado que já estava no banco, dentro
+    do prazo, sem nada pedido à fonte."""
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_fontes(
+        [
+            {"source": "worldbank", "status": "skipped"},
+            {"source": "worldbank", "status": "skipped"},
+            {"source": "oecd", "status": "done"},
+            {"source": "pytrends", "status": "failed"},
+        ]
+    )
+
+    nome, resumo, detalhe = fatos[0]
+    assert nome == "data_sources"
+    assert "World Bank: 0 fetched, 2 reused from the database" in resumo
+    assert "OECD: 1 fetched, 0 reused" in resumo
+    assert "1 failed" in resumo
+    assert detalhe["by_source"]["worldbank"] == {"fetched": 0, "reused": 2, "failed": 0}
+    assert detalhe["fetched_total"] == 1
+
+
+def test_an_analysis_that_downloaded_nothing_says_so(monkeypatch) -> None:
+    """O caso que mais importa ver e que produz silêncio: tudo já estava aqui."""
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_fontes([])
+
+    assert "nothing was asked of any source" in fatos[0][1]
+
+
+def test_the_trace_names_the_catalogue_entry_that_was_reused(monkeypatch) -> None:
+    """Qual produto foi reaproveitado, e por qual dos passos — `trigram` decide
+    por número, e o número vai junto."""
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_catalogo(
+        {
+            "canonical_title": "Picanha Swift",
+            "entity_key": "e1",
+            "catalog_method": "trigram",
+            "catalog_match_score": 0.87,
+        }
+    )
+
+    nome, resumo, detalhe = fatos[0]
+    assert nome == "catalog_resolution"
+    assert "Picanha Swift" in resumo
+    assert "reused an existing catalogue entry" in resumo
+    assert "0.870" in resumo
+    assert detalhe["reused"] is True
+
+
+def test_a_brand_new_catalogue_entry_is_called_out_as_new(monkeypatch) -> None:
+    """Só `created` significa produto inédito. Confundir isso com os outros três
+    é confundir catálogo que funciona com catálogo que duplica."""
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_catalogo({"canonical_title": "Picanha Bassi", "catalog_method": "created"})
+
+    _, resumo, detalhe = fatos[0]
+    assert "created a NEW catalogue entry" in resumo
+    assert detalhe["reused"] is False
+
+
+def test_an_analysis_from_before_the_field_existed_says_it_does_not_know(monkeypatch) -> None:
+    """Dizer "não foi registrado" é melhor que inventar um método ou omitir o
+    fato — as análises anteriores a 23/09/2026 não têm o campo."""
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_catalogo({"canonical_title": "Air Fryer", "catalog_method": None})
+
+    assert "was not recorded" in fatos[0][1]

@@ -51,6 +51,7 @@ async def start_node(state: dict) -> dict:
     core = _client()
     stored = await core.read_analysis(analysis_id)
     await core.mark_running(analysis_id)
+    _note_catalogo(stored)
 
     return {
         "entity_key": stored.get("entity_key"),
@@ -63,6 +64,61 @@ async def start_node(state: dict) -> dict:
         "deadline_at": state.get("deadline_at") or (datetime.now(UTC) + INSIST_FOR).isoformat(),
         "attempts": state.get("attempts", 0),
     }
+
+
+
+# Como o catálogo chegou na entidade, dito em português de gente. Só `created`
+# significa produto inédito; os outros três são reaproveitamento, e qual deles
+# foi importa — `alias` é certeza, `trigram` é semelhança de forma com um número
+# atrás, `llm` é um modelo escolhendo entre candidatos da mesma marca.
+_COMO_RESOLVEU = {
+    "alias": "reused an existing catalogue entry, matched by an exact alias",
+    "trigram": "reused an existing catalogue entry, matched by name similarity",
+    "llm": "reused an existing catalogue entry, chosen by the model among same-brand candidates",
+    "created": "created a NEW catalogue entry — this product had never been seen here",
+}
+
+
+def _note_catalogo(stored: dict[str, Any]) -> None:
+    """Say whether this analysis is about a product the catalogue already knew.
+
+    It is the difference between a catalogue that works and one that quietly
+    duplicates, and nothing else in the run reveals it: a fresh entity and a
+    matched one produce identically shaped analyses.
+
+    Read back from the record rather than observed at resolve time, because the
+    resolve happens in POST /analyze — before the graph runs, so before there
+    is a trace to attach anything to — and because a resumed run does not
+    resolve the product again.
+    """
+    metodo = stored.get("catalog_method")
+    titulo = stored.get("canonical_title")
+    if not metodo:
+        # Análises registradas antes de 23/09/2026 não têm o campo. Dizer isso
+        # é melhor que inventar um método ou omitir o fato.
+        observability.note(
+            "catalog_resolution",
+            summary=f"{titulo!r}: how it was matched was not recorded (analysis predates the field)",
+            detail={"entity_key": stored.get("entity_key"), "canonical_title": titulo},
+        )
+        return
+
+    score = stored.get("catalog_match_score")
+    descricao = _COMO_RESOLVEU.get(metodo, f"resolved by {metodo}")
+    resumo = f"{titulo!r}: {descricao}"
+    if score is not None:
+        resumo += f" (similarity {float(score):.3f})"
+    observability.note(
+        "catalog_resolution",
+        summary=resumo,
+        detail={
+            "method": metodo,
+            "reused": metodo != "created",
+            "entity_key": stored.get("entity_key"),
+            "canonical_title": titulo,
+            "match_score": None if score is None else float(score),
+        },
+    )
 
 
 async def enrich_node(state: dict) -> dict:
@@ -126,7 +182,74 @@ async def collect_node(state: dict) -> dict:
             logger.warning("Collection for %s could not run: %s", country, exc)
             tasks.append({"country": country, "status": "failed", "error_message": str(exc)})
 
+    _note_fontes(tasks)
     return {"coverage_tasks": tasks, "countries_collected": collected}
+
+
+# Os nomes das fontes como uma pessoa as chama, não como o enum as escreve.
+_FONTES = {
+    "worldbank": "World Bank",
+    "oecd": "OECD",
+    "undata": "UN Data",
+    "pytrends": "Google Ads (via DataForSEO)",
+}
+
+
+def _note_fontes(tasks: list[dict[str, Any]]) -> None:
+    """Say, per source, what was actually downloaded and what was already here.
+
+    `skipped` is the whole point: it means the datum was in the database, still
+    inside its freshness window, and nothing was requested from the source. A
+    run that reuses everything and a run that downloads everything take very
+    different amounts of time and money and produce the same shaped answer, so
+    without this the difference is invisible — which is how the reference
+    candidates spent months being re-downloaded on every single analysis.
+    """
+    por_fonte: dict[str, dict[str, int]] = {}
+    for task in tasks:
+        fonte = task.get("source")
+        if not fonte:
+            continue
+        contagem = por_fonte.setdefault(fonte, {"fetched": 0, "reused": 0, "failed": 0})
+        status = task.get("status")
+        if status == "skipped":
+            contagem["reused"] += 1
+        elif status == "failed":
+            contagem["failed"] += 1
+        else:
+            contagem["fetched"] += 1
+
+    if not por_fonte:
+        observability.note(
+            "data_sources",
+            summary="nothing was asked of any source: every indicator was already in the database",
+            detail={},
+        )
+        return
+
+    partes = []
+    for fonte in sorted(por_fonte):
+        c = por_fonte[fonte]
+        nome = _FONTES.get(fonte, fonte)
+        pedaco = f"{nome}: {c['fetched']} fetched, {c['reused']} reused from the database"
+        if c["failed"]:
+            pedaco += f", {c['failed']} failed"
+        partes.append(pedaco)
+
+    total_buscado = sum(c["fetched"] for c in por_fonte.values())
+    observability.note(
+        "data_sources",
+        summary=" | ".join(partes),
+        detail={"by_source": por_fonte, "fetched_total": total_buscado},
+    )
+    # Também como número, que é o que dá para comparar entre execuções: uma
+    # análise que de repente baixa tudo de novo aparece como uma subida aqui,
+    # sem ninguém precisar abrir o trace.
+    observability.record(
+        "indicators_fetched",
+        total_buscado,
+        comment="indicators downloaded from a source; the rest were already in the database",
+    )
 
 
 async def ruler_node(state: dict) -> dict:

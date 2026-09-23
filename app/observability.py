@@ -74,3 +74,30 @@ def record(name: str, value: float | str | bool, *, comment: str | None = None) 
         )
     except Exception:  # noqa: BLE001 — never let a score break a run
         logger.debug("Could not attach the score %s to the trace", name, exc_info=True)
+
+
+def note(name: str, *, summary: str, detail: dict[str, Any] | None = None) -> None:
+    """Attach one FACT to the run's trace, and say it in the log.
+
+    A sibling of `record`, for a different kind of thing. A score is a number
+    to compare across runs; this is what happened in this one — which sources
+    were actually read, which product the catalogue matched. Those do not
+    reduce to a number without losing the part someone needs.
+
+    It lands as an event under the node that is running, so it reads in place
+    in the trace tree rather than in a list of scores off to the side.
+
+    Never raises, for the same reason `record` does not: a measurement that
+    breaks the thing it measures is worse than no measurement.
+    """
+    logger.info("FACT %s: %s", name, summary)
+
+    handler = _handler()
+    if handler is None:
+        return
+    try:
+        from langfuse import get_client
+
+        get_client().create_event(name=name, output=summary, metadata=detail or {})
+    except Exception:  # noqa: BLE001 — never let an observation break a run
+        logger.debug("Could not attach the event %s to the trace", name, exc_info=True)

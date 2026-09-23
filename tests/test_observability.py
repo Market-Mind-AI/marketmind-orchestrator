@@ -108,3 +108,44 @@ def test_the_tool_calls_do_not_bury_the_lines_worth_reading(clean_logging) -> No
     setup_logging()
 
     assert logging.getLogger("httpx").level == logging.WARNING
+
+
+# --- os fatos: o que foi baixado, e de que produto se trata -----------------
+#
+# 23/09/2026. O trace dizia quais nós rodaram e quanto custaram, e não dizia as
+# duas coisas que separam uma execução cara de uma barata: se as fontes foram
+# realmente consultadas ou se o banco já tinha o dado, e se o catálogo achou o
+# produto ou criou outro. As duas são invisíveis no resultado — uma análise que
+# baixa tudo e uma que não baixa nada têm exatamente a mesma forma.
+
+
+def test_a_fact_is_written_to_the_log_even_with_no_tracing(monkeypatch, caplog) -> None:
+    """Sem chaves não há trace, e o fato não pode sumir junto: o log é onde
+    alguém lendo UMA execução com problema descobre o que houve."""
+    import logging
+
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+
+    with caplog.at_level(logging.INFO, logger="app.observability"):
+        observability.note("data_sources", summary="World Bank: 0 fetched, 12 reused from the database")
+
+    assert "FACT data_sources" in caplog.text
+    assert "12 reused" in caplog.text
+
+
+def test_a_broken_tracer_never_breaks_the_run(monkeypatch, caplog) -> None:
+    """Uma medição que quebra a coisa medida é pior que medição nenhuma — a
+    mesma regra de `record`, que esta função precisa herdar e não herdaria de
+    graça."""
+    import logging
+    from unittest.mock import patch
+
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+    with patch("langfuse.get_client", side_effect=RuntimeError("langfuse fora do ar")):
+        with caplog.at_level(logging.INFO, logger="app.observability"):
+            observability.note("catalog_resolution", summary="'Picanha Swift': created a NEW catalogue entry")
+
+    assert "FACT catalog_resolution" in caplog.text, "a linha do log sai mesmo com o trace quebrado"
