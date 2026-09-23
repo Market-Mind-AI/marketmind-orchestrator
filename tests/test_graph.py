@@ -266,13 +266,31 @@ async def test_the_search_terms_are_logged_per_country(core: AsyncMock, caplog) 
     assert "freidora de aire" in caplog.text
 
 
+
+async def _executar(analysis_id: str = "a1") -> None:
+    """O que `public._run` faz: o grafo dentro do bloco de contagem e do span.
+
+    Os testes passaram a precisar disto em 23/09/2026, quando o consumo de
+    tokens saiu do `deliver_node`. Ele era medido ali, antes da narrativa — que
+    é a maior chamada de modelo da execução, mais o juiz e a revisão — e numa
+    execução real reportou "0.0, no model call in this run" com quatro chamadas
+    feitas logo depois. Passou a ser medido no fim, que é o único ponto por
+    onde os dois caminhos do grafo passam.
+    """
+    from app import metrics, observability, spend
+
+    with spend.tally(), observability.run_span(f"analysis {analysis_id}"):
+        await build_graph().ainvoke({"analysis_id": analysis_id})
+        metrics.token_consumption()
+
+
 async def test_the_run_reports_the_five_measures(core: AsyncMock, caplog) -> None:
     """Every run says whether it did the job, how long the buyer waited, what it
     cost, how much of its work was worth doing, and how much of its text the
     evidence holds up. In the log, so one bad run can be read without a tracing
     backend, and on the trace, so many runs can be compared with one."""
     with caplog.at_level("INFO"):
-        await build_graph().ainvoke({"analysis_id": "a1"})
+        await _executar()
 
     assert "QUALITY task_completion_rate=1.0 (2 of 2 requested markets scored)" in caplog.text
     assert "QUALITY response_latency_seconds=" in caplog.text
@@ -350,7 +368,7 @@ async def test_a_run_that_gave_up_reports_the_same_five(core: AsyncMock, caplog)
     core.ensure_coverage = AsyncMock(return_value={"tasks": [{"country": "PRT", "status": "success"}]})
 
     with caplog.at_level("INFO"):
-        await build_graph().ainvoke({"analysis_id": "a1"})
+        await _executar()
 
     core.fail_analysis.assert_awaited_once()
     assert "QUALITY task_completion_rate=0.5 (1 of 2 requested markets scored)" in caplog.text
@@ -406,9 +424,9 @@ async def test_every_measure_of_a_full_run_lands_inside_the_trace(core, monkeypa
     monkeypatch.setattr("langfuse.get_client", lambda: _ClienteFalso())
     monkeypatch.setattr(quality, "judge_support", AsyncMock(return_value=None))
 
-    # Exatamente o que public._run faz em produção.
-    with observability.run_span("analysis a1"):
-        await build_graph().ainvoke({"analysis_id": "a1"})
+    # Exatamente o que public._run faz em produção, incluindo a contagem de
+    # tokens no FIM — que é onde ela passou a ser feita.
+    await _executar()
 
     assert registrados, "uma execução inteira não depositou nada no trace"
     fora = [nome for _, nome, dentro in registrados if not dentro]
@@ -419,3 +437,29 @@ async def test_every_measure_of_a_full_run_lands_inside_the_trace(core, monkeypa
     assert {"task_completion_rate", "response_latency_seconds", "token_consumption"} <= nomes, (
         "as cinco medidas são o que o trace existe para comparar entre execuções"
     )
+
+
+async def test_what_the_narrative_spends_is_counted(core: AsyncMock, caplog) -> None:
+    """A regressão de 23/09/2026. O consumo era medido no `deliver_node`, e o
+    grafo é deliver -> narrate: a narrativa é a MAIOR chamada de modelo da
+    execução, mais o juiz e a revisão, e nada disso entrava na conta. Uma
+    execução real reportou "token_consumption=0.0 (no model call in this run)"
+    com quatro chamadas feitas logo em seguida.
+
+    Aqui a narrativa gasta, como gasta em produção, e o total tem de vê-la.
+    """
+    from app import spend
+
+    async def _narrar(*_args, **_kwargs) -> str:  # noqa: ANN002, ANN003
+        spend.add_call(1200, 800)
+        return "Spain leads."
+
+    core.narrate = _narrar
+
+    with caplog.at_level("INFO"):
+        await _executar()
+
+    assert "QUALITY token_consumption=2000.0" in caplog.text, (
+        "medido antes da narrativa, o total ignora a maior chamada da execução"
+    )
+    assert "no model call in this run" not in caplog.text

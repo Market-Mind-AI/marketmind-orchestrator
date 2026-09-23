@@ -606,7 +606,14 @@ async def deliver_node(state: dict) -> dict:
     # narrative, which is attached a moment later and is not what was waited for.
     metrics.task_completion_rate(results, requested)
     metrics.response_latency_seconds(state.get("started_at"))
-    metrics.token_consumption()
+    # O consumo de tokens NÃO é medido aqui. O grafo é deliver -> narrate, e a
+    # narrativa é a maior chamada de modelo da execução — mais o juiz e, desde
+    # 23/09/2026, a revisão. Medir neste ponto reportava um total que não
+    # incluía nada disso: numa execução real de 23/09 deu "0.0, no model call
+    # in this run" com quatro chamadas feitas logo em seguida. Vai no fim de
+    # tudo, em public._run, que é o único ponto por onde os dois caminhos
+    # passam. A latência continua aqui de propósito: ela mede a espera do
+    # comprador, que termina quando a resposta sai.
     metrics.tool_invocation_accuracy(state.get("coverage_tasks") or [], list(requested))
     observability.record("analysis.attempts", float(state.get("attempts", 1)))
     return {}
@@ -666,7 +673,7 @@ async def give_up_node(state: dict) -> dict:
     requested = set(state["countries"])
     metrics.task_completion_rate(state.get("mos_results") or [], requested)
     metrics.response_latency_seconds(state.get("started_at"), what="given up")
-    metrics.token_consumption()
+    # Ver a nota em deliver_node: o consumo é reportado no fim, em public._run.
     metrics.tool_invocation_accuracy(state.get("coverage_tasks") or [], list(requested))
     observability.record("analysis.attempts", float(state.get("attempts", 1)))
     return {"errors": [reason]}

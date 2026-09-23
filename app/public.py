@@ -247,7 +247,7 @@ async def _run(analysis_id: str) -> None:
     """
     from app.graph import get_graph
     from app.observability import callbacks, run_span
-    from app import spend
+    from app import metrics, spend
 
     try:
         graph = get_graph()
@@ -263,6 +263,11 @@ async def _run(analysis_id: str) -> None:
         # soltos. Ver observability.run_span.
         with spend.tally(), run_span(f"analysis {analysis_id}"):
             await graph.ainvoke({"analysis_id": analysis_id}, config=config)
+            # Depois do grafo INTEIRO, e não na entrega. A narrativa vem depois
+            # do deliver e é a maior chamada de modelo da execução; medindo no
+            # deliver, o total saía sem ela, sem o juiz e sem a revisão. Aqui
+            # dentro de propósito: o span e a contagem ainda estão abertos.
+            metrics.token_consumption()
     except Exception:  # noqa: BLE001 — nothing left to raise to; the record carries the outcome
         logger.exception("Analysis %s ended in an unhandled error", analysis_id)
         try:
