@@ -1,4 +1,5 @@
-"""Where a run's state lives between steps, and across restarts.
+"""Where a run's state lives between steps, and across restarts -- and, next to
+it, where the agent's memory of runs before this one lives.
 
 The checkpointer writes a snapshot after each super-step, keyed by thread_id.
 Re-invoking the graph with the same thread_id resumes from the last completed
@@ -15,6 +16,11 @@ One thing this is NOT: a scheduler. It records where a run stopped, but nothing
 here notices that it stopped. Something outside has to re-invoke the graph with
 that thread_id -- otherwise the state is durable and never read, and an analysis
 that should insist for up to 24 hours simply stops.
+
+The store below is a different kind of memory: not one run's own progress, but
+what the agent has learned across runs -- today, which markets the sources do
+not hold data for. It is opened the same way, from the same connection, so the
+two switch together and neither is a surprise once the other is understood.
 """
 
 from collections.abc import AsyncIterator
@@ -71,3 +77,48 @@ async def open_checkpointer() -> AsyncIterator[Any]:
         # does.
         await saver.setup()
         yield saver
+
+
+@asynccontextmanager
+async def open_store() -> AsyncIterator[Any]:
+    """Yield the long-term memory store for the lifetime of the application.
+
+    Same CHECKPOINTER_* switch and connection as the checkpointer above, on
+    purpose: a store is meaningless without somewhere durable to put it, so it
+    rides on the same decision rather than introducing a second one nobody
+    asked for. "memory" here means the same thing it means there -- kept in
+    the process, lost on restart, fine for a test and never fine anywhere else.
+
+    Unlike the checkpointer, nothing downstream REQUIRES this to be configured:
+    every node that reads or writes it guards the call, so an application that
+    never opens a store -- or one whose store call fails -- runs exactly as it
+    did before memory existed. Durability of a run's own progress is a hard
+    requirement; remembering what past runs found out is not.
+    """
+    settings = get_settings()
+    kind = settings.checkpointer.strip().lower()
+
+    if kind == "memory":
+        from langgraph.store.memory import InMemoryStore
+
+        yield InMemoryStore()
+        return
+
+    if kind != "postgres":
+        raise CheckpointerNotConfigured(f"Unknown CHECKPOINTER '{settings.checkpointer}'; use 'postgres' or 'memory'.")
+
+    url = settings.resolved_checkpointer_url
+    if not url:
+        raise CheckpointerNotConfigured(
+            "CHECKPOINTER is 'postgres' but no connection is configured. Set "
+            "CHECKPOINTER_DB_HOST/NAME/USER/PASSWORD (or CHECKPOINTER_DATABASE_URL), "
+            "or ask for CHECKPOINTER=memory explicitly and accept losing runs on restart."
+        )
+
+    from langgraph.store.postgres import AsyncPostgresStore
+
+    async with AsyncPostgresStore.from_conn_string(url) as store:
+        # Same reasoning as the saver's setup() above: creates its tables if
+        # they are not there, safe to repeat, so it runs on every start.
+        await store.setup()
+        yield store

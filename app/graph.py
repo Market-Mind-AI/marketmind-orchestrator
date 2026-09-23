@@ -19,7 +19,7 @@ from app.nodes import (
 from app.state import OrchestratorState
 
 
-def build_graph(checkpointer: Any | None = None):  # noqa: ANN201
+def build_graph(checkpointer: Any | None = None, store: Any | None = None):  # noqa: ANN201
     """The analysis, in the order the scoring service's own loop ran it.
 
     Linear except for one branch, and that branch is the analysis's real
@@ -29,7 +29,10 @@ def build_graph(checkpointer: Any | None = None):  # noqa: ANN201
     answer, it is a different one.
 
     Pass a checkpointer and every super-step is recorded under the run's
-    thread_id, so re-invoking resumes rather than restarting.
+    thread_id, so re-invoking resumes rather than restarting. Pass a store and
+    the nodes that declare one -- collect, score, give_up -- receive it; the
+    rest are unaffected, because LangGraph injects it by the node's own
+    signature, not by anything declared here.
     """
     workflow = StateGraph(OrchestratorState)
     workflow.add_node("start", start_node)
@@ -66,7 +69,7 @@ def build_graph(checkpointer: Any | None = None):  # noqa: ANN201
     workflow.add_edge("narrate", END)
     workflow.add_edge("give_up", END)
 
-    return workflow.compile(checkpointer=checkpointer)
+    return workflow.compile(checkpointer=checkpointer, store=store)
 
 
 # The compiled graph, put here by the lifespan so a background run can reach it.
