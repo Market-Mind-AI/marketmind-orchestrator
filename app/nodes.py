@@ -116,8 +116,13 @@ def _note_catalogo(stored: dict[str, Any]) -> None:
     score = stored.get("catalog_match_score")
     motivo = stored.get("catalog_match_reasoning")
 
+    # O par: o que foi perguntado e em que foi parar. Com um lado só, "picanha,
+    # coincidência exata" não diz nada a quem pediu "top sirloin cap", e uma
+    # coincidência de 41% não pode ser julgada por ninguém.
+    perguntado = stored.get("catalog_query_text")
     veredito = "REUSED the catalogue entry" if reaproveitou else "CREATED a new catalogue entry"
-    resumo = f"{titulo!r}: {veredito} — match by {tipo}, {explicacao}"
+    alvo = f"{perguntado!r} -> {titulo!r}" if perguntado and perguntado != titulo else f"{titulo!r}"
+    resumo = f"{alvo}: {veredito} — match by {tipo}, {explicacao}"
     if score is not None:
         # Em porcentagem porque é assim que se lê "quanto coincidiu". O número
         # cru (0-1) fica no metadata para quem for comparar execuções.
@@ -137,6 +142,7 @@ def _note_catalogo(stored: dict[str, Any]) -> None:
             "match_percent": None if score is None else round(float(score) * 100, 1),
             "match_score": None if score is None else float(score),
             "match_reasoning": motivo,
+            "queried_text": perguntado,
             "entity_key": stored.get("entity_key"),
             "canonical_title": titulo,
         },

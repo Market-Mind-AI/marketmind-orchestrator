@@ -113,6 +113,9 @@ async def analyze(payload: dict[str, Any]) -> dict[str, Any]:
             catalog_method=resolved.get("method"),
             catalog_match_score=resolved.get("match_score"),
             catalog_match_reasoning=resolved.get("match_reasoning"),
+            # O que o comprador digitou, guardado ao lado do que o catálogo
+            # respondeu: sem o par, uma resolução não é auditável.
+            catalog_query_text=product_name,
             countries=countries_asked,
             estimated_price=payload.get("estimated_price"),
             price_currency=payload.get("price_currency"),

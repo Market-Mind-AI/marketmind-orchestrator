@@ -324,3 +324,33 @@ def test_demand_that_was_entirely_in_the_database_is_not_called_unneeded(monkeyp
     resumo = fatos[0][1]
     assert "nothing fetched — every search term and related keyword was already stored" in resumo
     assert "nothing needed from it" not in resumo.split("Google Ads")[1]
+
+
+def test_the_fact_names_what_was_asked_and_what_it_resolved_to(monkeypatch) -> None:
+    """Medido em produção em 23/09/2026: uma análise pedida como "top sirloin
+    cap" aparecia como "'picanha': coincidência exata" — verdadeiro e ilegível,
+    porque a palavra `picanha` não estava em lugar nenhum do pedido. E uma
+    coincidência de 41% não pode ser julgada por quem só vê um dos lados."""
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_catalogo(
+        {
+            "canonical_title": "picanha",
+            "catalog_query_text": "top sirloin cap",
+            "catalog_method": "alias",
+        }
+    )
+
+    _, resumo, detalhe = fatos[0]
+    assert "'top sirloin cap' -> 'picanha'" in resumo
+    assert detalhe["queried_text"] == "top sirloin cap"
+
+
+def test_the_same_text_on_both_sides_is_not_repeated(monkeypatch) -> None:
+    """Quem pediu exatamente o nome da entidade não ganha uma seta apontando
+    para si mesmo."""
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_catalogo({"canonical_title": "picanha", "catalog_query_text": "picanha", "catalog_method": "alias"})
+
+    assert "->" not in fatos[0][1]
