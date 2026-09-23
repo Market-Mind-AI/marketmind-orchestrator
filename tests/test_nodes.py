@@ -228,9 +228,10 @@ def test_a_scoring_service_that_never_answered_is_not_called_a_cache_hit(monkeyp
     assert "the scoring service did not answer" in resumo
 
 
-def test_the_trace_names_the_catalogue_entry_that_was_reused(monkeypatch) -> None:
-    """Qual produto foi reaproveitado, e por qual dos passos — `trigram` decide
-    por número, e o número vai junto."""
+def test_a_spelling_match_reports_the_percentage_and_the_reuse_flag(monkeypatch) -> None:
+    """Três coisas numa linha: coincidiu, de que tipo, e quanto. O trigram é o
+    único passo que decide por número, e o número vira porcentagem porque é
+    assim que se lê "quanto coincidiu"."""
     fatos = _fatos(monkeypatch)
 
     nodes._note_catalogo(
@@ -244,10 +245,48 @@ def test_the_trace_names_the_catalogue_entry_that_was_reused(monkeypatch) -> Non
 
     nome, resumo, detalhe = fatos[0]
     assert nome == "catalog_resolution"
-    assert "Picanha Swift" in resumo
-    assert "reused an existing catalogue entry" in resumo
-    assert "0.870" in resumo
-    assert detalhe["reused"] is True
+    assert "REUSED the catalogue entry" in resumo
+    assert "match by spelling" in resumo
+    assert "87.0% similar" in resumo
+    assert detalhe["reused_existing_entry"] is True
+    assert detalhe["match_percent"] == 87.0
+    assert detalhe["match_type"] == "spelling"
+
+
+def test_a_meaning_match_has_no_percentage_and_says_why(monkeypatch) -> None:
+    """A coincidência SEMÂNTICA é a que não tem número: `quadcopter` e `drone`
+    não têm semelhança de escrita nenhuma. Foi essa a razão de o passo de vetor
+    sair em 14/08/2026 — nenhuma distância de cosseno separa esses casos,
+    porque a relação é conhecimento. O que explica a decisão é a frase."""
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_catalogo(
+        {
+            "canonical_title": "drone",
+            "catalog_method": "llm",
+            "catalog_match_score": None,
+            "catalog_match_reasoning": "quadcopter is a synonym for drone",
+        }
+    )
+
+    _, resumo, detalhe = fatos[0]
+    assert "REUSED the catalogue entry" in resumo
+    assert "match by meaning" in resumo
+    assert "quadcopter is a synonym for drone" in resumo
+    assert "% similar" not in resumo, "não há porcentagem quando a coincidência é de significado"
+    assert detalhe["match_percent"] is None
+    assert detalhe["reused_existing_entry"] is True
+
+
+def test_an_exact_alias_is_not_confused_with_a_similarity(monkeypatch) -> None:
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_catalogo({"canonical_title": "picanha", "catalog_method": "alias"})
+
+    _, resumo, detalhe = fatos[0]
+    assert "match by exact" in resumo
+    assert detalhe["match_type"] == "exact"
+    assert detalhe["match_percent"] is None
 
 
 def test_a_brand_new_catalogue_entry_is_called_out_as_new(monkeypatch) -> None:
@@ -258,8 +297,9 @@ def test_a_brand_new_catalogue_entry_is_called_out_as_new(monkeypatch) -> None:
     nodes._note_catalogo({"canonical_title": "Picanha Bassi", "catalog_method": "created"})
 
     _, resumo, detalhe = fatos[0]
-    assert "created a NEW catalogue entry" in resumo
-    assert detalhe["reused"] is False
+    assert "CREATED a new catalogue entry" in resumo
+    assert "match by none" in resumo
+    assert detalhe["reused_existing_entry"] is False
 
 
 def test_an_analysis_from_before_the_field_existed_says_it_does_not_know(monkeypatch) -> None:

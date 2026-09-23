@@ -67,20 +67,28 @@ async def start_node(state: dict) -> dict:
 
 
 
-# Como o catálogo chegou na entidade, dito em português de gente. Só `created`
-# significa produto inédito; os outros três são reaproveitamento, e qual deles
-# foi importa — `alias` é certeza, `trigram` é semelhança de forma com um número
-# atrás, `llm` é um modelo escolhendo entre candidatos da mesma marca.
-_COMO_RESOLVEU = {
-    "alias": "reused an existing catalogue entry, matched by an exact alias",
-    "trigram": "reused an existing catalogue entry, matched by name similarity",
-    "llm": "reused an existing catalogue entry, chosen by the model among same-brand candidates",
-    "created": "created a NEW catalogue entry — this product had never been seen here",
+# Como o catálogo chegou na entidade, e de que TIPO foi a coincidência. Os três
+# primeiros são reaproveitamento e só o quarto é produto inédito, mas a
+# diferença entre os três importa: `alias` é igualdade, `trigram` é semelhança
+# de ESCRITA com número próprio, e `llm` é coincidência de SIGNIFICADO, que não
+# tem número nenhum — `quadcopter` e `drone` não se parecem em nada escrito.
+#
+# Foi por isso que o passo de vetor saiu: `product_catalog.embedding`
+# (vector(1536)) existiu até 14/08/2026 e foi medido contra os 89 termos reais
+# do catálogo — o trigram resolve 71 deles com precisão de 100%, e nos 18 que
+# sobram nenhuma distância de cosseno decide, porque a relação é conhecimento e
+# não proximidade de string. Ver a migration 027 do serviço de scoring.
+_COINCIDENCIA = {
+    "alias": ("exact", "an exact alias already pointed at it"),
+    "trigram": ("spelling", "its name is spelled almost the same"),
+    "llm": ("meaning", "it means the same product, by the model's judgement"),
+    "created": ("none", "nothing in the catalogue was this product"),
 }
 
 
 def _note_catalogo(stored: dict[str, Any]) -> None:
-    """Say whether this analysis is about a product the catalogue already knew.
+    """Say whether this analysis is about a product the catalogue already knew,
+    which kind of match found it, and how close it was.
 
     It is the difference between a catalogue that works and one that quietly
     duplicates, and nothing else in the run reveals it: a fresh entity and a
@@ -103,20 +111,34 @@ def _note_catalogo(stored: dict[str, Any]) -> None:
         )
         return
 
+    reaproveitou = metodo != "created"
+    tipo, explicacao = _COINCIDENCIA.get(metodo, ("unknown", f"resolved by {metodo}"))
     score = stored.get("catalog_match_score")
-    descricao = _COMO_RESOLVEU.get(metodo, f"resolved by {metodo}")
-    resumo = f"{titulo!r}: {descricao}"
+    motivo = stored.get("catalog_match_reasoning")
+
+    veredito = "REUSED the catalogue entry" if reaproveitou else "CREATED a new catalogue entry"
+    resumo = f"{titulo!r}: {veredito} — match by {tipo}, {explicacao}"
     if score is not None:
-        resumo += f" (similarity {float(score):.3f})"
+        # Em porcentagem porque é assim que se lê "quanto coincidiu". O número
+        # cru (0-1) fica no metadata para quem for comparar execuções.
+        resumo += f" ({float(score) * 100:.1f}% similar)"
+    if motivo:
+        resumo += f' — "{motivo}"'
+
     observability.note(
         "catalog_resolution",
         summary=resumo,
         detail={
+            # A flag que responde "aproveitou ou criou", sozinha e sem precisar
+            # interpretar o método.
+            "reused_existing_entry": reaproveitou,
+            "match_type": tipo,
             "method": metodo,
-            "reused": metodo != "created",
+            "match_percent": None if score is None else round(float(score) * 100, 1),
+            "match_score": None if score is None else float(score),
+            "match_reasoning": motivo,
             "entity_key": stored.get("entity_key"),
             "canonical_title": titulo,
-            "match_score": None if score is None else float(score),
         },
     )
 

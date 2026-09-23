@@ -112,6 +112,7 @@ async def analyze(payload: dict[str, Any]) -> dict[str, Any]:
             # gravar, o fato se perde nos dois casos.
             catalog_method=resolved.get("method"),
             catalog_match_score=resolved.get("match_score"),
+            catalog_match_reasoning=resolved.get("match_reasoning"),
             countries=countries_asked,
             estimated_price=payload.get("estimated_price"),
             price_currency=payload.get("price_currency"),
