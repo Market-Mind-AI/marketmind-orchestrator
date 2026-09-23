@@ -242,7 +242,7 @@ async def _run(analysis_id: str) -> None:
     to raise to.
     """
     from app.graph import get_graph
-    from app.observability import callbacks
+    from app.observability import callbacks, run_span
     from app import spend
 
     try:
@@ -254,7 +254,10 @@ async def _run(analysis_id: str) -> None:
     config = {"configurable": {"thread_id": analysis_id}, "callbacks": callbacks()}
     lease = asyncio.create_task(_hold_claim(analysis_id))
     try:
-        with spend.tally():
+        # O span aberto aqui é o que dá contexto a TUDO que roda dentro: sem
+        # ele os scores eram descartados em silêncio e os fatos viravam traces
+        # soltos. Ver observability.run_span.
+        with spend.tally(), run_span(f"analysis {analysis_id}"):
             await graph.ainvoke({"analysis_id": analysis_id}, config=config)
     except Exception:  # noqa: BLE001 — nothing left to raise to; the record carries the outcome
         logger.exception("Analysis %s ended in an unhandled error", analysis_id)

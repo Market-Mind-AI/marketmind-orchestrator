@@ -12,6 +12,8 @@ than silently, so nobody discovers it while trying to explain a bad run.
 """
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any
 
@@ -45,6 +47,41 @@ def callbacks() -> list[Any]:
 
 def tracing_enabled() -> bool:
     return _handler() is not None
+
+
+@contextmanager
+def run_span(name: str) -> Iterator[None]:
+    """Hold one span open for the whole run, so everything inside it attaches.
+
+    Without this, `record` silently lost every score. Measured in production on
+    23/09/2026: each QUALITY line was followed by langfuse's "No active span in
+    current context... will be skipped", so the five measures — completion,
+    latency, tokens, tool accuracy, hallucination — reached the log and never
+    reached Langfuse. They had been written weeks earlier and looked fine,
+    because the log line is emitted first and unconditionally.
+
+    The LangChain callback handler does attach a context per observation, but
+    it does so inside its own callback invocation; a node body is not
+    guaranteed to run in that context. Opening one span around the whole
+    invocation is what makes the guarantee, and it costs one observation.
+
+    `create_event` failed differently and worse — it created its own ROOT trace
+    instead of skipping, so the facts would have landed in Langfuse detached
+    from the analysis that produced them. Present but unfindable.
+
+    A no-op when tracing is not configured, like everything else here.
+    """
+    if _handler() is None:
+        yield
+        return
+    try:
+        from langfuse import get_client
+
+        with get_client().start_as_current_observation(as_type="span", name=name):
+            yield
+    except Exception:  # noqa: BLE001 — a span that cannot open must not stop the run
+        logger.debug("Could not open the run span %s", name, exc_info=True)
+        yield
 
 
 def record(name: str, value: float | str | bool, *, comment: str | None = None) -> None:

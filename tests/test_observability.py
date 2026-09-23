@@ -149,3 +149,44 @@ def test_a_broken_tracer_never_breaks_the_run(monkeypatch, caplog) -> None:
             observability.note("catalog_resolution", summary="'Picanha Swift': created a NEW catalogue entry")
 
     assert "FACT catalog_resolution" in caplog.text, "a linha do log sai mesmo com o trace quebrado"
+
+
+def test_a_score_outside_a_span_is_dropped_and_inside_one_is_not(monkeypatch) -> None:
+    """O defeito que estava em produção desde que as cinco métricas foram
+    escritas, medido em 23/09/2026: cada linha QUALITY era seguida de "No
+    active span in current context... will be skipped". A linha do log sai
+    primeiro e incondicionalmente, então tudo parecia certo.
+
+    Este teste prende o contrato pelo qual `run_span` existe: dentro dele há
+    contexto para anexar, fora não há.
+    """
+    from unittest.mock import MagicMock, patch
+
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+    cliente = MagicMock()
+    with patch("langfuse.get_client", return_value=cliente):
+        with observability.run_span("analysis 123"):
+            observability.record("task_completion_rate", 1.0)
+
+    cliente.start_as_current_observation.assert_called_once()
+    assert cliente.start_as_current_observation.call_args.kwargs["name"] == "analysis 123"
+    cliente.score_current_trace.assert_called_once()
+
+
+def test_the_run_still_happens_when_the_span_cannot_open(monkeypatch) -> None:
+    """Uma medição que impede a coisa medida é pior que medição nenhuma — e
+    este span embrulha a análise inteira, então é o lugar onde essa regra mais
+    importa."""
+    from unittest.mock import patch
+
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+    rodou = False
+    with patch("langfuse.get_client", side_effect=RuntimeError("langfuse fora")):
+        with observability.run_span("analysis 123"):
+            rodou = True
+
+    assert rodou, "o corpo tem de rodar mesmo sem conseguir abrir o span"
