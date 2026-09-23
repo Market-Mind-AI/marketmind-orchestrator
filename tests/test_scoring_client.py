@@ -212,7 +212,7 @@ def test_a_call_made_during_a_run_carries_the_runs_trace(monkeypatch) -> None:
     analysis_id = "a8c5d38b-db60-413c-b8f3-086a0befb83a"
 
     try:
-        with observability.run(analysis_id):
+        with observability.run_span(f"analysis {analysis_id}", seed=analysis_id):
             headers = ScoringClient(base_url="http://core", token="t").headers()
     finally:
         observability._handler.cache_clear()

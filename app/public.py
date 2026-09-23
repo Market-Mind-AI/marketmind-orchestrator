@@ -261,7 +261,7 @@ async def _run(analysis_id: str) -> None:
         # O span aberto aqui é o que dá contexto a TUDO que roda dentro: sem
         # ele os scores eram descartados em silêncio e os fatos viravam traces
         # soltos. Ver observability.run_span.
-        with spend.tally(), run_span(f"analysis {analysis_id}"):
+        with spend.tally(), run_span(f"analysis {analysis_id}", seed=analysis_id):
             await graph.ainvoke({"analysis_id": analysis_id}, config=config)
             # Depois do grafo INTEIRO, e não na entrega. A narrativa vem depois
             # do deliver e é a maior chamada de modelo da execução; medindo no

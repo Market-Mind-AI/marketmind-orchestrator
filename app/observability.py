@@ -50,8 +50,13 @@ def tracing_enabled() -> bool:
 
 
 @contextmanager
-def run_span(name: str) -> Iterator[None]:
+def run_span(name: str, *, seed: str | None = None) -> Iterator[None]:
     """Hold one span open for the whole run, so everything inside it attaches.
+
+    `seed` makes the trace id a function of the analysis id instead of random,
+    so a run's trace can be reached from the id the rest of the system already
+    has — which is how its scores are read back, and how a support question
+    ("what happened in analysis X?") gets answered without a search.
 
     Without this, `record` silently lost every score. Measured in production on
     23/09/2026: each QUALITY line was followed by langfuse's "No active span in
@@ -75,9 +80,10 @@ def run_span(name: str) -> Iterator[None]:
         yield
         return
     try:
-        from langfuse import get_client
+        from langfuse import Langfuse, get_client
 
-        with get_client().start_as_current_observation(as_type="span", name=name):
+        trace_context = {"trace_id": Langfuse.create_trace_id(seed=seed)} if seed else None
+        with get_client().start_as_current_observation(as_type="span", name=name, trace_context=trace_context):
             yield
     except Exception:  # noqa: BLE001 — a span that cannot open must not stop the run
         logger.debug("Could not open the run span %s", name, exc_info=True)
