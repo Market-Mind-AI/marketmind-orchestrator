@@ -234,3 +234,16 @@ def test_an_analysis_from_before_the_field_existed_says_it_does_not_know(monkeyp
     nodes._note_catalogo({"canonical_title": "Air Fryer", "catalog_method": None})
 
     assert "was not recorded" in fatos[0][1]
+
+
+def test_a_scoring_service_that_never_answered_is_not_called_a_cache_hit(monkeypatch) -> None:
+    """`collect_node` fabrica uma tarefa sem fonte quando o scoring nem
+    respondeu. Contar isso como "nada foi pedido porque tudo já estava no
+    banco" é relatar sucesso onde houve queda — e a queda é justamente o que
+    alguém abre o trace para encontrar."""
+    fatos = _fatos(monkeypatch)
+
+    nodes._note_fontes([{"country": "BRA", "status": "failed", "error_message": "connection refused"}])
+
+    assert "no source was reached at all" in fatos[0][1]
+    assert "already in the database" not in fatos[0][1]

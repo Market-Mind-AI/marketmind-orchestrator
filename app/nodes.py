@@ -220,11 +220,24 @@ def _note_fontes(tasks: list[dict[str, Any]]) -> None:
             contagem["fetched"] += 1
 
     if not por_fonte:
-        observability.note(
-            "data_sources",
-            summary="nothing was asked of any source: every indicator was already in the database",
-            detail={},
-        )
+        # Sem fonte em nenhuma tarefa há dois casos opostos, e dizer o errado é
+        # pior que não dizer nada. Lista vazia: nada precisou ser coletado.
+        # Lista com tarefas mas sem fonte: são as falhas que `collect_node`
+        # fabrica quando o serviço de scoring nem respondeu — aí NADA foi
+        # coletado nem reaproveitado, e chamar isso de "já estava no banco"
+        # seria relatar sucesso onde houve queda.
+        if tasks:
+            observability.note(
+                "data_sources",
+                summary=f"no source was reached at all: {len(tasks)} collection(s) could not even run",
+                detail={"unreachable": tasks[:5]},
+            )
+        else:
+            observability.note(
+                "data_sources",
+                summary="nothing was asked of any source: every indicator was already in the database",
+                detail={},
+            )
         return
 
     partes = []
