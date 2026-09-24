@@ -221,15 +221,27 @@ class ScoringClient:
     # --- the work ---
 
     async def enrich_terms(
-        self, entity_key: str, countries: list[str], *, with_candidates: bool = True
+        self,
+        entity_key: str,
+        countries: list[str],
+        *,
+        with_candidates: bool = True,
+        brand_key: str | None = None,
     ) -> dict[str, Any]:
         return await self._call(
             "POST",
             "/internal/enrich-terms",
-            json={"entity_key": entity_key, "countries": countries, "with_candidates": with_candidates},
+            json={
+                "entity_key": entity_key,
+                "countries": countries,
+                "with_candidates": with_candidates,
+                "brand_key": brand_key,
+            },
         )
 
-    async def ensure_coverage(self, country_iso3: str, entity_key: str | None) -> dict[str, Any]:
+    async def ensure_coverage(
+        self, country_iso3: str, entity_key: str | None, brand_key: str | None = None
+    ) -> dict[str, Any]:
         """Collect what this country is missing, and report what was tried.
 
         The tasks are the answer, not the data. A FAILED task is a source that
@@ -245,11 +257,11 @@ class ScoringClient:
         return await self._call(
             "POST",
             "/internal/coverage/ensure",
-            json={"country_iso3": country_iso3, "entity_key": entity_key},
+            json={"country_iso3": country_iso3, "entity_key": entity_key, "brand_key": brand_key},
         )
 
     async def candidates_coverage(
-        self, entity_key: str, requested_countries: list[str], period_key: str
+        self, entity_key: str, requested_countries: list[str], period_key: str, brand_key: str | None = None
     ) -> dict[str, Any]:
         """Collect the reference markets, unless the period's champion is known.
 
@@ -267,16 +279,22 @@ class ScoringClient:
                 "entity_key": entity_key,
                 "requested_countries": requested_countries,
                 "period_key": period_key,
+                "brand_key": brand_key,
             },
         )
 
     async def demand_ceiling(
-        self, entity_key: str, countries: list[str], period_key: str
+        self, entity_key: str, countries: list[str], period_key: str, brand_key: str | None = None
     ) -> tuple[float | None, dict[str, Any] | None]:
         body = await self._call(
             "POST",
             "/internal/demand-ceiling",
-            json={"entity_key": entity_key, "countries": countries, "period_key": period_key},
+            json={
+                "entity_key": entity_key,
+                "countries": countries,
+                "period_key": period_key,
+                "brand_key": brand_key,
+            },
         )
         return body.get("demand_ceiling"), body.get("demand_ruler")
 
@@ -300,7 +318,13 @@ class ScoringClient:
         return body.get("candidates", [])
 
     async def set_champion(
-        self, entity_key: str, period_key: str, *, country: str | None, mos: float | None
+        self,
+        entity_key: str,
+        period_key: str,
+        *,
+        country: str | None,
+        mos: float | None,
+        brand_key: str | None = None,
     ) -> dict[str, Any]:
         """A null country is a real outcome: "nothing was scorable this period".
         Without recording it, the same fruitless work runs on every later
@@ -308,7 +332,13 @@ class ScoringClient:
         return await self._call(
             "POST",
             "/internal/champion",
-            json={"entity_key": entity_key, "period_key": period_key, "country": country, "mos": mos},
+            json={
+                "entity_key": entity_key,
+                "period_key": period_key,
+                "country": country,
+                "mos": mos,
+                "brand_key": brand_key,
+            },
         )
 
     async def compute_indicators(
@@ -359,12 +389,22 @@ class ScoringClient:
         return body.get("packet")
 
     async def narrate(
-        self, packet: dict[str, Any], product_name: str, user_prompt: str | None = None
+        self,
+        packet: dict[str, Any],
+        product_name: str,
+        user_prompt: str | None = None,
+        *,
+        brand: str | None = None,
     ) -> str | None:
         body = await self._call(
             "POST",
             "/internal/narrate",
-            json={"packet": packet, "product_name": product_name, "user_prompt": user_prompt},
+            json={
+                "packet": packet,
+                "product_name": product_name,
+                "brand": brand,
+                "user_prompt": user_prompt,
+            },
         )
         return body.get("narrative")
 

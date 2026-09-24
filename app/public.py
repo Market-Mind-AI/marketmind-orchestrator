@@ -116,6 +116,11 @@ async def analyze(payload: dict[str, Any]) -> dict[str, Any]:
             # O que o comprador digitou, guardado ao lado do que o catálogo
             # respondeu: sem o par, uma resolução não é auditável.
             catalog_query_text=product_name,
+            # O vínculo da marca, que é metade da resposta: a análise fica
+            # ligada ao produto E à marca, e nulo aqui significa "foi do
+            # produto" — é isso que separa uma coisa da outra depois.
+            brand_key=resolved.get("brand_key"),
+            brand_name=resolved.get("brand"),
             countries=countries_asked,
             estimated_price=payload.get("estimated_price"),
             price_currency=payload.get("price_currency"),

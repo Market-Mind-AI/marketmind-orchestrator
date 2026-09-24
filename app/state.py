@@ -23,6 +23,11 @@ class OrchestratorState(TypedDict, total=False):
 
     entity_key: str | None
     canonical_title: str | None
+    # A marca desta análise, quando há. Ela decide QUAL vocabulário se mede —
+    # "juan valdez café" e "café" são buscas diferentes no Google Ads — e é
+    # metade do par que a narrativa final explica.
+    brand_key: str | None
+    brand_name: str | None
     generic_entity_key: str | None
     countries: list[str]
     user_prompt: str | None

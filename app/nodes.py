@@ -145,6 +145,8 @@ async def start_node(state: dict) -> dict:
     return {
         "entity_key": stored.get("entity_key"),
         "canonical_title": stored.get("canonical_title"),
+        "brand_key": stored.get("brand_key"),
+        "brand_name": stored.get("brand_name"),
         "countries": list(stored.get("countries") or []),
         "user_prompt": stored.get("user_prompt"),
         # Decided here and only here, then carried in the checkpoint.
@@ -261,14 +263,16 @@ async def enrich_node(state: dict) -> dict:
 
     core = _client()
     await core.record_progress(state["analysis_id"], "preparing the product's vocabulary")
-    await core.enrich_terms(entity_key, state["countries"], with_candidates=True)
+    marca = state.get("brand_key")
+    await core.enrich_terms(entity_key, state["countries"], with_candidates=True, brand_key=marca)
 
-    # The category behind a branded product is enriched WITHOUT candidates: the
-    # demand ruler belongs to the brand, and the category is the scale the
-    # brand's demand is read against — context, never scored.
-    family = state.get("generic_entity_key")
-    if family:
-        await core.enrich_terms(family, state["countries"], with_candidates=False)
+    # A CATEGORIA do mesmo produto, quando a análise é de marca: desde
+    # 24/09/2026 não há entidade-família, é o outro vocabulário da MESMA
+    # entidade (sem marca). Sem candidatos, porque a régua de demanda é da
+    # marca e a categoria é a escala contra a qual ela se lê — contexto, nunca
+    # pontuado.
+    if marca:
+        await core.enrich_terms(entity_key, state["countries"], with_candidates=False, brand_key=None)
     return {}
 
 
@@ -302,7 +306,7 @@ async def collect_node(state: dict, store: BaseStore | None = None) -> dict:
 
         await core.record_progress(analysis_id, f"collecting {country}")
         try:
-            answer = await core.ensure_coverage(country, entity_key)
+            answer = await core.ensure_coverage(country, entity_key, state.get("brand_key"))
             # The words this country was actually searched for. Logged because
             # they are the one thing a model chose that nothing else exposes:
             # get the native term wrong and the analysis is immaculate and
@@ -452,7 +456,9 @@ async def ruler_node(state: dict) -> dict:
 
     core = _client()
     await core.record_progress(state["analysis_id"], "settling the demand ruler")
-    known = await core.candidates_coverage(entity_key, state["countries"], state["period_key"])
+    known = await core.candidates_coverage(
+        entity_key, state["countries"], state["period_key"], state.get("brand_key")
+    )
     # O passo mais caro do sistema, e até 23/09/2026 o único sem relato nenhum:
     # a coleta dos mercados de referência não devolvia nada, então nem o custo
     # nem o reaproveitamento dela apareciam em lugar algum. Fato próprio, e não
@@ -474,7 +480,9 @@ async def ruler_node(state: dict) -> dict:
             related_fresh=int(known.get("related_fresh") or 0),
             nome="data_sources_reference_markets",
         )
-    ceiling, ruler = await core.demand_ceiling(entity_key, state["countries"], state["period_key"])
+    ceiling, ruler = await core.demand_ceiling(
+        entity_key, state["countries"], state["period_key"], state.get("brand_key")
+    )
     return {
         "champion_cached": bool(known.get("champion_cached")),
         "cached_champion_country": known.get("champion_country"),
@@ -635,6 +643,7 @@ async def champion_node(state: dict) -> dict:
             state["period_key"],
             country=best_requested["country"],
             mos=float(best_requested["mos"]),
+            brand_key=state.get("brand_key"),
         )
         return {"champion_country": best_requested["country"]}
 
@@ -652,6 +661,7 @@ async def champion_node(state: dict) -> dict:
         state["period_key"],
         country=champion["country"] if champion else None,
         mos=float(champion["mos"]) if champion else None,
+        brand_key=state.get("brand_key"),
     )
 
     requested = set(state["countries"])
@@ -744,7 +754,10 @@ async def narrate_node(state: dict) -> dict:
         # "never".
         await core.record_progress(state["analysis_id"], "writing the explanation")
         narrative = await core.narrate(
-            packet, state.get("canonical_title") or "", state.get("user_prompt")
+            packet,
+            state.get("canonical_title") or "",
+            state.get("user_prompt"),
+            brand=state.get("brand_name"),
         )
         await core.attach_narrative(state["analysis_id"], narrative)
         await core.record_progress(state["analysis_id"], None)
