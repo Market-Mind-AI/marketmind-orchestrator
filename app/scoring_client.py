@@ -304,6 +304,7 @@ class ScoringClient:
         requested_countries: list[str],
         period_key: str,
         demand_ceiling: float | None,
+        brand_key: str | None = None,
     ) -> list[dict[str, Any]]:
         body = await self._call(
             "POST",
@@ -313,6 +314,7 @@ class ScoringClient:
                 "requested_countries": requested_countries,
                 "period_key": period_key,
                 "demand_ceiling": demand_ceiling,
+                "brand_key": brand_key,
             },
         )
         return body.get("candidates", [])
@@ -386,6 +388,7 @@ class ScoringClient:
         countries: list[str],
         period_key: str,
         demand_ruler: dict[str, Any] | None = None,
+        brand_key: str | None = None,
     ) -> dict[str, Any] | None:
         body = await self._call(
             "POST",
@@ -395,6 +398,7 @@ class ScoringClient:
                 "countries": countries,
                 "period_key": period_key,
                 "demand_ruler": demand_ruler,
+                "brand_key": brand_key,
             },
         )
         return body.get("packet")

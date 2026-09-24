@@ -654,7 +654,11 @@ async def champion_node(state: dict) -> dict:
         return {"champion_country": best_requested["country"]}
 
     candidates = await core.score_candidates(
-        entity_key, state["countries"], state["period_key"], state.get("demand_ceiling")
+        entity_key,
+        state["countries"],
+        state["period_key"],
+        state.get("demand_ceiling"),
+        state.get("brand_key"),
     )
     everything = [*scored, *[c for c in candidates if c.get("mos") is not None]]
     champion = max(everything, key=lambda r: float(r["mos"]), default=None)
@@ -691,7 +695,7 @@ async def evidence_node(state: dict) -> dict:
     core = _client()
     await core.record_progress(state["analysis_id"], "assembling the evidence")
     packet = await core.build_evidence(
-        entity_key, state["countries"], state["period_key"], state.get("demand_ruler")
+        entity_key, state["countries"], state["period_key"], state.get("demand_ruler"), state.get("brand_key")
     )
     if packet is not None:
         requested = set(state["countries"])
