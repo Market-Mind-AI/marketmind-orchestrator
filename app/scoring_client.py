@@ -342,7 +342,12 @@ class ScoringClient:
         )
 
     async def compute_indicators(
-        self, entity_key: str | None, country_iso3: str, period_key: str, demand_ceiling: float | None
+        self,
+        entity_key: str | None,
+        country_iso3: str,
+        period_key: str,
+        demand_ceiling: float | None,
+        brand_key: str | None = None,
     ) -> dict[str, Any]:
         return await self._call(
             "POST",
@@ -351,6 +356,7 @@ class ScoringClient:
                 "entity_key": entity_key,
                 "country": country_iso3,
                 "period_key": period_key,
+                "brand_key": brand_key,
                 "demand_ceiling": demand_ceiling,
             },
         )

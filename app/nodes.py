@@ -504,7 +504,11 @@ async def measure_node(state: dict) -> dict:
     for country in state["countries"]:
         await core.record_progress(analysis_id, f"measuring {country}")
         await core.compute_indicators(
-            state.get("entity_key"), country, state["period_key"], state.get("demand_ceiling")
+            state.get("entity_key"),
+            country,
+            state["period_key"],
+            state.get("demand_ceiling"),
+            state.get("brand_key"),
         )
     await core.calibrate_weights(state["period_key"])
     return {}
