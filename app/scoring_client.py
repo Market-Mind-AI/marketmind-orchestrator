@@ -366,12 +366,17 @@ class ScoringClient:
         return body.get("weights", {})
 
     async def compute_mos(
-        self, entity_key: str, countries: list[str], period_key: str
+        self, entity_key: str, countries: list[str], period_key: str, brand_key: str | None = None
     ) -> list[dict[str, Any]]:
         body = await self._call(
             "POST",
             "/mos/compute",
-            json={"entity_key": entity_key, "countries": countries, "period_key": period_key},
+            json={
+                "entity_key": entity_key,
+                "countries": countries,
+                "period_key": period_key,
+                "brand_key": brand_key,
+            },
         )
         return body.get("results", body if isinstance(body, list) else [])
 

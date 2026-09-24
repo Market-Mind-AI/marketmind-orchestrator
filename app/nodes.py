@@ -527,7 +527,9 @@ async def score_node(state: dict, store: BaseStore | None = None) -> dict:
 
     core = _client()
     await core.record_progress(state["analysis_id"], "scoring the markets")
-    results = await core.compute_mos(entity_key, state["countries"], state["period_key"])
+    results = await core.compute_mos(
+        entity_key, state["countries"], state["period_key"], state.get("brand_key")
+    )
 
     for row in results:
         if row.get("mos") is not None and row.get("country"):
