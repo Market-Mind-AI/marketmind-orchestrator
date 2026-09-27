@@ -13,7 +13,7 @@ than silently, so nobody discovers it while trying to explain a bad run.
 
 import logging
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from functools import lru_cache
 from typing import Any
 
@@ -75,18 +75,32 @@ def run_span(name: str, *, seed: str | None = None) -> Iterator[None]:
     from the analysis that produced them. Present but unfindable.
 
     A no-op when tracing is not configured, like everything else here.
-    """
-    if _handler() is None:
-        yield
-        return
-    try:
-        from langfuse import Langfuse, get_client
 
-        trace_context = {"trace_id": Langfuse.create_trace_id(seed=seed)} if seed else None
-        with get_client().start_as_current_observation(as_type="span", name=name, trace_context=trace_context):
-            yield
-    except Exception:  # noqa: BLE001 — a span that cannot open must not stop the run
-        logger.debug("Could not open the run span %s", name, exc_info=True)
+    SÓ A ABERTURA é protegida, e a distinção custou uma investigação. A primeira
+    versão punha o `yield` dentro do `try`: uma exceção do corpo voltava ao
+    gerador no ponto do yield, era capturada por este `except`, e o gerador
+    então cedia uma segunda vez — o que o `contextmanager` rejeita com
+    `RuntimeError: generator didn't stop after throw()`. O erro real sumia,
+    trocado por um erro sobre geradores. Medido em dev em 27/09/2026: três
+    análises morreram e o log dizia apenas isso, com a causa verdadeira — o
+    serviço de pytrends fora do ar — em lugar nenhum.
+
+    Observabilidade que não pode quebrar a execução também não pode APAGAR o
+    motivo de ela ter quebrado.
+    """
+    with ExitStack() as stack:
+        if _handler() is not None:
+            try:
+                from langfuse import Langfuse, get_client
+
+                trace_context = {"trace_id": Langfuse.create_trace_id(seed=seed)} if seed else None
+                stack.enter_context(
+                    get_client().start_as_current_observation(
+                        as_type="span", name=name, trace_context=trace_context
+                    )
+                )
+            except Exception:  # noqa: BLE001 — a span that cannot open must not stop the run
+                logger.debug("Could not open the run span %s", name, exc_info=True)
         yield
 
 

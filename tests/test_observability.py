@@ -190,3 +190,37 @@ def test_the_run_still_happens_when_the_span_cannot_open(monkeypatch) -> None:
             rodou = True
 
     assert rodou, "o corpo tem de rodar mesmo sem conseguir abrir o span"
+
+
+def test_o_span_nao_apaga_o_motivo_da_falha(monkeypatch) -> None:
+    """O erro do corpo tem de sair do span como entrou.
+
+    A primeira versão protegia o `yield` junto com a abertura: a exceção do
+    corpo voltava ao gerador, era capturada, e o gerador cedia de novo — o que
+    vira `RuntimeError: generator didn't stop after throw()`. Em dev, em
+    27/09/2026, três análises morreram e o log só dizia isso; a causa real (o
+    serviço de pytrends fora do ar) não aparecia em lugar nenhum.
+
+    Não quebrar a execução e não apagar o motivo dela ter quebrado são a mesma
+    obrigação.
+    """
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+    class FonteForaDoAr(Exception):
+        pass
+
+    with pytest.raises(FonteForaDoAr, match="pytrends fora do ar"):
+        with observability.run_span("analysis 123"):
+            raise FonteForaDoAr("pytrends fora do ar")
+
+
+def test_o_motivo_sobrevive_tambem_sem_tracing(monkeypatch) -> None:
+    """Mesmo caminho, com o tracing desligado — que é o ramo que o `yield`
+    solto no início já atendia, e que precisa continuar atendendo."""
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="a causa verdadeira"):
+        with observability.run_span("analysis 123"):
+            raise ValueError("a causa verdadeira")
