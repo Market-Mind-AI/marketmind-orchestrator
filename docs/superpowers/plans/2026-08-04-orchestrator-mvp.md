@@ -1,5 +1,21 @@
 # Orchestrator MVP Implementation Plan
 
+> **HISTÓRICO / SUPERADO.** Este documento é o desenho de origem (04/08/2026) e não descreve
+> mais o serviço. O que vale hoje está no `README.md` deste repositório e nas specs posteriores em
+> `docs/superpowers/specs/*`. O que mudou desde então:
+>
+> - **Sete rotas, não uma.** Além de `POST /run-analysis` (hoje chamado pelo caminho de retomada do
+>   serviço de scoring), o orquestrador é a porta de entrada do frontend: `POST /analyze` (202),
+>   `GET /analyze/{id}`, `GET /analyze/{id}/stream`, `POST /catalog/identify-image`,
+>   `GET /countries`, `GET /healthz`.
+> - **Nenhum nó de LLM e nenhum fan-out direto aos coletores.** Os 11 nós chamam apenas as
+>   ferramentas `/internal` do serviço de scoring; extração, coleta, MOS e narrativa acontecem lá.
+>   Este serviço só decide o próximo passo.
+> - **Não é mais stateless.** Checkpointer e store do LangGraph em Postgres (banco próprio): uma
+>   análise retoma do último nó concluído e o agente lembra, entre execuções, os mercados sem dados.
+> - **O scoring é chamado por HTTP**, com token interno e `traceparent`, e não importado como
+>   biblioteca nem embutido no grafo.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Create a stateless FastAPI + LangGraph microservice that orchestrates the MarketMind enrichment and scoring pipeline.
