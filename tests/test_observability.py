@@ -224,3 +224,80 @@ def test_o_motivo_sobrevive_tambem_sem_tracing(monkeypatch) -> None:
     with pytest.raises(ValueError, match="a causa verdadeira"):
         with observability.run_span("analysis 123"):
             raise ValueError("a causa verdadeira")
+
+
+# --- o level do trace (19/10/2026) -------------------------------------------
+#
+# A página Tracing lista observações raiz, e a view Quality filtra por level
+# ERROR ou WARNING. Um give_up termina a execução limpamente — level DEFAULT —
+# então toda análise que desistiu listava como saudável, e a view ficava vazia
+# enquanto análises falhavam.
+
+
+def test_a_flag_lands_on_the_runs_root_span(monkeypatch) -> None:
+    from unittest.mock import MagicMock, patch
+
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+    cliente = MagicMock()
+    raiz = cliente.start_as_current_observation.return_value.__enter__.return_value
+    with patch("langfuse.get_client", return_value=cliente):
+        with observability.run_span("analysis 123"):
+            observability.flag("ERROR", "Analysis incomplete for PRT: the sources do not hold the data.")
+
+    raiz.update.assert_called_once_with(
+        level="ERROR", status_message="Analysis incomplete for PRT: the sources do not hold the data."
+    )
+    cliente.update_current_span.assert_not_called()
+
+
+def test_a_flag_outside_a_run_falls_back_to_the_current_span(monkeypatch) -> None:
+    from unittest.mock import MagicMock, patch
+
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+    cliente = MagicMock()
+    with patch("langfuse.get_client", return_value=cliente):
+        observability.flag("WARNING", "collection for PRT could not run: 502")
+
+    cliente.update_current_span.assert_called_once_with(
+        level="WARNING", status_message="collection for PRT could not run: 502"
+    )
+
+
+def test_the_root_span_is_forgotten_when_the_run_ends(monkeypatch) -> None:
+    """Senão a próxima execução no mesmo contexto marcaria o span da anterior."""
+    from unittest.mock import MagicMock, patch
+
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+    cliente = MagicMock()
+    with patch("langfuse.get_client", return_value=cliente):
+        with observability.run_span("analysis 123"):
+            pass
+        assert observability._root.get() is None
+
+
+def test_a_flag_is_said_in_the_log_even_without_tracing(monkeypatch, caplog) -> None:
+    import logging
+
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="app.observability"):
+        observability.flag("ERROR", "Analysis incomplete for PRT: deadline")
+
+    assert "FLAG ERROR: Analysis incomplete for PRT: deadline" in caplog.text
+
+
+def test_a_broken_tracer_never_breaks_a_flag(monkeypatch) -> None:
+    from unittest.mock import patch
+
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+    with patch("langfuse.get_client", side_effect=RuntimeError("langfuse fora do ar")):
+        observability.flag("ERROR", "whatever")

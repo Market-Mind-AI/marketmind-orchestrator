@@ -240,3 +240,57 @@ def test_the_same_indicator_in_a_different_period_is_a_different_call(caplog) ->
         metrics.tool_invocation_accuracy(tasks, ["BRA"])
 
     assert "0 redundant" in _lines(caplog)
+
+
+# --- demand_cost (2026-10-19) -------------------------------------------------
+#
+# The one cost of an analysis that is not a model. DataForSEO bills every Google
+# Ads task; the collector reports it on its response headers, the scoring
+# service relays it, and until now it stopped at the collector's log.
+
+
+def test_dataforseo_dollars_are_summed_across_the_runs_collections(caplog) -> None:
+    with spend.tally():
+        spend.add_response(httpx.Headers({"X-DataForSEO-Cost-USD": "0.050000", "X-DataForSEO-Calls": "1"}))
+        spend.add_response(
+            httpx.Headers(
+                {"X-LLM-Input-Tokens": "100", "X-LLM-Output-Tokens": "10", "X-LLM-Calls": "1"}
+            )  # a model-only response adds nothing here
+        )
+        spend.add_response(
+            httpx.Headers(
+                {
+                    "X-DataForSEO-Cost-USD": "0.007500",
+                    "X-DataForSEO-Calls": "2",
+                    "X-DataForSEO-Calls-Without-Cost": "1",
+                }
+            )
+        )
+        with caplog.at_level(logging.INFO):
+            metrics.demand_cost()
+
+    line = _lines(caplog)
+    assert "dataforseo_cost_usd=0.0575" in line
+    assert "3 DataForSEO tasks; 1 of them reported no cost" in line
+
+
+def test_a_run_that_collected_no_demand_data_says_so(caplog) -> None:
+    with spend.tally(), caplog.at_level(logging.INFO):
+        metrics.demand_cost()
+
+    assert "dataforseo_cost_usd=0.0 (no Google Ads collection in this run)" in _lines(caplog)
+
+
+def test_the_spend_summary_names_the_dataforseo_dollars_too() -> None:
+    with spend.tally() as spent:
+        spend.add_call(100, 10)
+        spend.add_response(httpx.Headers({"X-DataForSEO-Cost-USD": "0.05", "X-DataForSEO-Calls": "1"}))
+
+    assert str(spent) == "100 in + 10 out over 1 model calls; $0.0500 at DataForSEO over 1 tasks"
+
+
+def test_an_unreadable_cost_header_adds_nothing_and_breaks_nothing() -> None:
+    with spend.tally() as spent:
+        spend.add_response(httpx.Headers({"X-DataForSEO-Cost-USD": "n/a", "X-DataForSEO-Calls": "1"}))
+
+    assert (spent.dataforseo_usd, spent.dataforseo_calls) == (0.0, 1)

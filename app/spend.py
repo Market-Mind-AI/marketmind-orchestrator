@@ -1,9 +1,12 @@
-"""What a run spends on models, added up across the calls it makes.
+"""What a run spends, added up across the calls it makes: tokens on models,
+and dollars at DataForSEO for the demand data.
 
 The agent decides; the scoring service makes the model calls those decisions
 cause and reports what each one cost on its response headers (see that
 service's report_llm_usage middleware). This adds them up for the run, plus the
-judge, which is the one model this service calls itself.
+judge, which is the one model this service calls itself. The same headers carry
+what the Google Ads collector was billed by DataForSEO for the collections the
+run caused — the one cost of an analysis that is not a model.
 
 A context variable holding a mutable tally, opened once per run. LangGraph runs
 nodes in tasks derived from the request's context, and a child task inherits the
@@ -33,6 +36,11 @@ class Spend:
     # Model calls whose provider reported no figures. Kept apart so a total of
     # zero over several calls reads as "not reported" rather than as "free".
     calls_without_usage: int = 0
+    # What DataForSEO billed, in USD as it reports it, over the Google Ads
+    # tasks this run caused; and how many of those carried no figure.
+    dataforseo_usd: float = 0.0
+    dataforseo_calls: int = 0
+    dataforseo_calls_without_cost: int = 0
     _seen: set[str] = field(default_factory=set)
 
     @property
@@ -43,6 +51,10 @@ class Spend:
         parts = [f"{self.input_tokens} in + {self.output_tokens} out over {self.calls} model calls"]
         if self.calls_without_usage:
             parts.append(f"{self.calls_without_usage} of them reported no usage")
+        if self.dataforseo_calls:
+            parts.append(f"${self.dataforseo_usd:.4f} at DataForSEO over {self.dataforseo_calls} tasks")
+            if self.dataforseo_calls_without_cost:
+                parts.append(f"{self.dataforseo_calls_without_cost} of them reported no cost")
         return "; ".join(parts)
 
 
@@ -67,16 +79,20 @@ def current() -> Spend:
 
 
 def add_response(headers: Mapping[str, str]) -> None:
-    """Add one scoring-service response's reported model spend to the run."""
-    if "X-LLM-Calls" not in headers:
-        return
+    """Add one scoring-service response's reported spend to the run: the
+    model calls it made, and what the collector it called was billed."""
     spend = _current.get()
     if spend is None:
         return
-    spend.input_tokens += _as_int(headers.get("X-LLM-Input-Tokens"))
-    spend.output_tokens += _as_int(headers.get("X-LLM-Output-Tokens"))
-    spend.calls += _as_int(headers.get("X-LLM-Calls"))
-    spend.calls_without_usage += _as_int(headers.get("X-LLM-Calls-Without-Usage"))
+    if "X-LLM-Calls" in headers:
+        spend.input_tokens += _as_int(headers.get("X-LLM-Input-Tokens"))
+        spend.output_tokens += _as_int(headers.get("X-LLM-Output-Tokens"))
+        spend.calls += _as_int(headers.get("X-LLM-Calls"))
+        spend.calls_without_usage += _as_int(headers.get("X-LLM-Calls-Without-Usage"))
+    if "X-DataForSEO-Calls" in headers:
+        spend.dataforseo_usd += _as_float(headers.get("X-DataForSEO-Cost-USD"))
+        spend.dataforseo_calls += _as_int(headers.get("X-DataForSEO-Calls"))
+        spend.dataforseo_calls_without_cost += _as_int(headers.get("X-DataForSEO-Calls-Without-Cost"))
 
 
 def add_call(input_tokens: int | None, output_tokens: int | None) -> None:
@@ -97,3 +113,10 @@ def _as_int(value: str | None) -> int:
         return int(value) if value is not None else 0
     except ValueError:
         return 0
+
+
+def _as_float(value: str | None) -> float:
+    try:
+        return float(value) if value is not None else 0.0
+    except ValueError:
+        return 0.0

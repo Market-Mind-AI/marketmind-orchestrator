@@ -337,3 +337,20 @@ async def test_a_declared_market_is_never_sent_to_the_scoring_client_for_collect
     # A marca viaja junto desde 24/09/2026: é ela que decide qual vocabulário
     # a coleta mede. Nula aqui, que é o caso do produto sem marca.
     full_run.ensure_coverage.assert_awaited_once_with("ESP", "e1", None)
+
+
+async def test_giving_up_flags_the_trace_as_an_error_with_the_reason(core: AsyncMock, monkeypatch) -> None:
+    """A desistência termina a execução limpamente, então o trace listava como
+    saudável (level DEFAULT) — e a view Quality do Langfuse ficava vazia
+    enquanto análises falhavam (19/10/2026)."""
+    flags: list[tuple[str, str]] = []
+    monkeypatch.setattr(nodes.observability, "flag", lambda level, message: flags.append((level, message)))
+    state = _state(
+        mos_results=[{"country": "ESP", "mos": 70.0}],
+        coverage_tasks=[{"country": "PRT", "status": "failed", "error_message": "502"}],
+        attempts=3,
+    )
+
+    await nodes.give_up_node(state, store=InMemoryStore())
+
+    assert flags == [("ERROR", "Analysis incomplete for PRT: collection kept failing after 3 attempts.")]

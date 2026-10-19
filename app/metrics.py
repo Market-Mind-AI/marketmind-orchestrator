@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 TASK_COMPLETION_RATE = "task_completion_rate"
 RESPONSE_LATENCY_SECONDS = "response_latency_seconds"
 TOKEN_CONSUMPTION = "token_consumption"
+DATAFORSEO_COST_USD = "dataforseo_cost_usd"
 TOOL_INVOCATION_ACCURACY = "tool_invocation_accuracy"
 HALLUCINATION_RATE = "hallucination_rate"
 
@@ -77,6 +78,27 @@ def token_consumption() -> None:
         observability.record(TOKEN_CONSUMPTION, 0.0, comment="no model call in this run")
         return
     observability.record(TOKEN_CONSUMPTION, float(spent.total_tokens), comment=str(spent))
+
+
+def demand_cost() -> None:
+    """What the run's demand data cost at DataForSEO, in USD.
+
+    The one cost of an analysis that is not a model, and the one the token
+    figure cannot see. Each Google Ads task is billed by DataForSEO and the
+    collector reports the amount; the scoring service relays it on the same
+    headers as the tokens, and each collection already sits in the trace as
+    an observation with that cost (the scoring service writes it there, next
+    to the call that spent it). This is the run's total, as a score, so runs
+    compare on it the way they compare on tokens.
+    """
+    spent = spend.current()
+    if not spent.dataforseo_calls:
+        observability.record(DATAFORSEO_COST_USD, 0.0, comment="no Google Ads collection in this run")
+        return
+    comment = f"{spent.dataforseo_calls} DataForSEO tasks"
+    if spent.dataforseo_calls_without_cost:
+        comment += f"; {spent.dataforseo_calls_without_cost} of them reported no cost"
+    observability.record(DATAFORSEO_COST_USD, round(spent.dataforseo_usd, 6), comment=comment)
 
 
 def tool_invocation_accuracy(coverage_tasks: list[dict[str, Any]], countries: list[str]) -> None:

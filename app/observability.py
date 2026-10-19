@@ -14,12 +14,18 @@ than silently, so nobody discovers it while trying to explain a bad run.
 import logging
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from typing import Any
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# The run's root span, for as long as run_span holds it open. `flag` writes
+# its level there: the Tracing page lists root observations, so a run that
+# failed gracefully has to say so on its root or it lists as a healthy one.
+_root: ContextVar[Any | None] = ContextVar("run_root_span", default=None)
 
 
 @lru_cache(maxsize=1)
@@ -94,14 +100,46 @@ def run_span(name: str, *, seed: str | None = None) -> Iterator[None]:
                 from langfuse import Langfuse, get_client
 
                 trace_context = {"trace_id": Langfuse.create_trace_id(seed=seed)} if seed else None
-                stack.enter_context(
+                span = stack.enter_context(
                     get_client().start_as_current_observation(
                         as_type="span", name=name, trace_context=trace_context
                     )
                 )
+                stack.callback(_root.reset, _root.set(span))
             except Exception:  # noqa: BLE001 — a span that cannot open must not stop the run
                 logger.debug("Could not open the run span %s", name, exc_info=True)
         yield
+
+
+def flag(level: str, message: str) -> None:
+    """Mark the run's trace as degraded (WARNING) or failed (ERROR), and say why.
+
+    For the failures the graph handles on purpose. An exception that escapes
+    the run marks its span ERROR on the way out, but a run that gives up with a
+    reason, or that finishes without one of its parts, ends cleanly — and a
+    clean end is a DEFAULT level, which is a healthy run in every view that
+    filters on level. Measured on 2026-10-19: every `give_up` in the project
+    listed as healthy, and the Quality view (level ERROR or WARNING) was
+    empty while analyses were failing.
+
+    The level lands on the run's root span — what the Tracing page lists —
+    with the message as its status. Falls back to whatever span is current
+    outside a run. Never raises, for the same reason `record` does not.
+    """
+    logger.log(logging.ERROR if level == "ERROR" else logging.WARNING, "FLAG %s: %s", level, message)
+
+    if _handler() is None:
+        return
+    try:
+        root = _root.get()
+        if root is not None:
+            root.update(level=level, status_message=message)
+            return
+        from langfuse import get_client
+
+        get_client().update_current_span(level=level, status_message=message)
+    except Exception:  # noqa: BLE001 — never let a flag break a run
+        logger.debug("Could not flag the trace %s: %s", level, message, exc_info=True)
 
 
 def record(name: str, value: float | str | bool, *, comment: str | None = None) -> None:

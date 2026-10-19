@@ -233,6 +233,11 @@ async def judge_support(narrative: str, packet: dict[str, Any]) -> dict[str, Any
         "additionalProperties": False,
     }
 
+    # The one model call this service makes itself, traced like the ones the
+    # scoring service makes (its TracedProvider): a generation in the run's
+    # trace with model, tokens and level, so the run's cost includes the
+    # measuring and a judge that fails shows where it failed.
+    generation = _open_judge_generation(settings.judge_model, prompt)
     try:
         response = await client.chat.completions.create(
             model=settings.judge_model,
@@ -244,6 +249,7 @@ async def judge_support(narrative: str, packet: dict[str, Any]) -> dict[str, Any
         )
     except Exception as exc:  # noqa: BLE001 — a judge that fails must never fail the analysis
         logger.warning("The hallucination judge could not be reached, so the narrative was not judged: %s", exc)
+        _close_judge_generation(generation, level="ERROR", status_message=f"{type(exc).__name__}: {exc}")
         return None
 
     # The judge is a model call the run made, so it belongs in the run's token
@@ -252,11 +258,56 @@ async def judge_support(narrative: str, packet: dict[str, Any]) -> dict[str, Any
     from app import spend
 
     judged = getattr(response, "usage", None)
-    spend.add_call(
-        getattr(judged, "prompt_tokens", None),
-        getattr(judged, "completion_tokens", None),
-    )
+    prompt_tokens = getattr(judged, "prompt_tokens", None)
+    completion_tokens = getattr(judged, "completion_tokens", None)
+    spend.add_call(prompt_tokens, completion_tokens)
 
     import json
 
-    return json.loads(response.choices[0].message.content or "{}")
+    content = response.choices[0].message.content or "{}"
+    if prompt_tokens is None and completion_tokens is None:
+        _close_judge_generation(
+            generation,
+            output=content,
+            level="WARNING",
+            status_message="the provider reported no token usage; the call is not priced",
+        )
+    else:
+        _close_judge_generation(
+            generation,
+            output=content,
+            usage_details={"input": prompt_tokens or 0, "output": completion_tokens or 0},
+        )
+    return json.loads(content)
+
+
+def _open_judge_generation(model: str, prompt: str) -> Any | None:
+    """The judge's generation in the run's trace, or None when untraced.
+    Never raises: tracing the judge must not fail the judge."""
+    from app import observability
+
+    if not observability.tracing_enabled():
+        return None
+    try:
+        from langfuse import get_client
+
+        return get_client().start_observation(
+            name="narrative_judge",
+            as_type="generation",
+            model=model,
+            input={"user": prompt},
+            metadata={"provider": "AsyncOpenAI", "site": "narrative_judge"},
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not open the judge's generation", exc_info=True)
+        return None
+
+
+def _close_judge_generation(generation: Any | None, **update: Any) -> None:
+    if generation is None:
+        return
+    try:
+        generation.update(**{k: v for k, v in update.items() if v is not None})
+        generation.end()
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not close the judge's generation", exc_info=True)

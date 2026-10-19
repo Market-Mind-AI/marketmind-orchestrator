@@ -334,6 +334,7 @@ async def collect_node(state: dict, store: BaseStore | None = None) -> dict:
             # Transient by definition. Recorded, not raised: one country's
             # source being down must not abandon the others' collection.
             logger.warning("Collection for %s could not run: %s", country, exc)
+            observability.flag("WARNING", f"collection for {country} could not run: {exc}")
             tasks.append({"country": country, "status": "failed", "error_message": str(exc)})
 
     _note_fontes(
@@ -775,6 +776,7 @@ async def narrate_node(state: dict) -> dict:
         return {"narrative": narrative}
     except (ScoringUnavailable, ScoringRejected) as exc:
         logger.exception("Analysis %s is delivered, but attaching its narrative failed", state["analysis_id"])
+        observability.flag("WARNING", f"delivered without a narrative: {exc}")
         return {"errors": [f"narration failed: {exc}"]}
 
 
@@ -813,6 +815,8 @@ async def give_up_node(state: dict, store: BaseStore | None = None) -> dict:
 
     reason = f"Analysis incomplete for {', '.join(missing) or 'every requested market'}: {cause}."
     await _client().fail_analysis(state["analysis_id"], reason)
+    # The run ends cleanly from here, so its trace would list as healthy.
+    observability.flag("ERROR", reason)
 
     # Reported for a failed run too. A completion rate measured only on the runs
     # that completed is always 1.0, and a latency measured only on those hides
@@ -896,6 +900,7 @@ async def _check_narrative(narrative: str | None, packet: dict[str, Any], analys
     """
     if not narrative:
         observability.record("narrative.written", False, comment="the model returned nothing")
+        observability.flag("WARNING", "delivered without a narrative: the model returned nothing")
         return
 
     try:
