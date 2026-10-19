@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 import respx
@@ -138,6 +140,26 @@ async def test_a_failed_narration_comes_back_as_none() -> None:
     respx.post(f"{_BASE}/internal/narrate").mock(return_value=httpx.Response(200, json={"narrative": None}))
 
     assert await _client().narrate({"countries": []}, "air fryer") is None
+
+
+@respx.mock
+async def test_the_narrative_is_asked_for_in_the_analysis_language() -> None:
+    route = respx.post(f"{_BASE}/internal/narrate").mock(
+        return_value=httpx.Response(200, json={"narrative": "España lidera."})
+    )
+
+    assert await _client().narrate({"countries": []}, "air fryer", language="es") == "España lidera."
+    assert json.loads(route.calls.last.request.content)["language"] == "es"
+
+
+@respx.mock
+async def test_the_revision_is_asked_for_in_the_same_language() -> None:
+    route = respx.post(f"{_BASE}/internal/narrate/revise").mock(
+        return_value=httpx.Response(200, json={"narrative": "Texto revisado"})
+    )
+
+    assert await _client().revise_narrative("España es la mejor apuesta.", ["no cubre costes"], language="es")
+    assert json.loads(route.calls.last.request.content)["language"] == "es"
 
 
 @respx.mock

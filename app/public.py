@@ -125,6 +125,10 @@ async def analyze(payload: dict[str, Any]) -> dict[str, Any]:
             estimated_price=payload.get("estimated_price"),
             price_currency=payload.get("price_currency"),
             user_prompt=payload.get("user_prompt"),
+            # The language of the buyer's interface, which is the language the
+            # narrative comes out in. Stored with the record, so a resumed run
+            # writes in the same one; absent means the scoring service's default.
+            language=_language(payload.get("language")),
         )
     except (ScoringUnavailable, ScoringRejected) as exc:
         raise _as_http_error(exc) from exc
@@ -138,6 +142,14 @@ async def analyze(payload: dict[str, Any]) -> dict[str, Any]:
         logger.warning("Analysis %s could not be claimed; running it anyway: %s", request_id, exc)
     _start(request_id)
     return {"request_id": request_id, "status": registered["status"]}
+
+
+def _language(value: Any) -> str | None:
+    """Lower-cased and trimmed, or None: the scoring service decides which
+    languages it has texts for and refuses the rest, and that refusal reaches
+    the browser as the 422 it is."""
+    text = (str(value) if value is not None else "").strip().lower()
+    return text or None
 
 
 # Strong references to the runs in flight. asyncio keeps only a WEAK reference to

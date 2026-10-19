@@ -326,3 +326,23 @@ async def test_the_watch_survives_a_pass_that_blows_up(scoring: AsyncMock) -> No
 
     assert alive
     assert scoring.orphaned_analyses.await_count >= 3
+
+
+# --- the narrative comes out in the language the buyer is reading in ---
+
+
+def test_the_interface_language_is_registered_with_the_analysis(scoring: AsyncMock, started: list[str]) -> None:
+    """The interface is EN/ES and the scoring service's default was PT: a reader
+    who chose Spanish got a Portuguese explanation. The language is the buyer's
+    choice, so it travels with the record and a resumed run reads it back."""
+    _client().post("/analyze", json={"product_name": "air fryer", "countries": ["ESP"], "language": "ES"})
+
+    assert scoring.register_analysis.await_args.kwargs["language"] == "es"
+
+
+def test_no_language_asked_for_leaves_the_default_to_the_scoring_service(
+    scoring: AsyncMock, started: list[str]
+) -> None:
+    _client().post("/analyze", json={"product_name": "air fryer", "countries": ["ESP"]})
+
+    assert scoring.register_analysis.await_args.kwargs["language"] is None

@@ -63,7 +63,7 @@ it is for tests and has to be asked for by name.
 | Method | Path | What it does |
 |---|---|---|
 | `GET` | `/healthz` | Liveness. |
-| `POST` | `/run-analysis` | Runs (or resumes) the graph for `analysis_id`, streaming graph events as SSE. Called by the scoring service's resume path. |
+| `POST` | `/run-analysis` | Runs (or resumes) the graph for `analysis_id`, streaming graph events as SSE. Called by the scoring service's resume path, which must send the shared secret as `X-Internal-Token`. |
 | `POST` | `/catalog/identify-image` | Identifies a product from a photo or a line of text, so the buyer can correct it before anything is scored. |
 | `GET` | `/countries` | The markets that can be analysed. |
 | `POST` | `/analyze` | Resolves the product, registers the analysis and starts the run. Answers `202` with the id. |
@@ -131,7 +131,7 @@ are ignored):
 | `ROOT_PATH` | `` | Proxy prefix. |
 | `LOG_LEVEL` | `INFO` | |
 | `SCORING_API_URL` | `http://marketmind-core:8000` | The only service this one calls. |
-| `SCORING_INTERNAL_TOKEN` | — | Required by the scoring service's `/internal` routes. |
+| `SCORING_INTERNAL_TOKEN` | — | Required by the scoring service's `/internal` routes, and required back on `POST /run-analysis` (`X-Internal-Token`; unset closes the route with 503). The scoring service holds the same value as `INTERNAL_API_TOKEN`. |
 | `CHECKPOINTER` | `postgres` | `memory` only for tests. |
 | `CHECKPOINTER_DB_HOST/PORT/NAME/USER/PASSWORD` | — | The service's own database. |
 | `CHECKPOINTER_DATABASE_URL` | — | Wins over the parts when set. |

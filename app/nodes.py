@@ -149,6 +149,7 @@ async def start_node(state: dict) -> dict:
         "brand_name": stored.get("brand_name"),
         "countries": list(stored.get("countries") or []),
         "user_prompt": stored.get("user_prompt"),
+        "language": stored.get("language"),
         # Decided here and only here, then carried in the checkpoint.
         "period_key": state.get("period_key") or _period_key(),
         "started_at": state.get("started_at") or datetime.now(UTC).isoformat(),
@@ -769,10 +770,11 @@ async def narrate_node(state: dict) -> dict:
             state.get("canonical_title") or "",
             state.get("user_prompt"),
             brand=state.get("brand_name"),
+            language=state.get("language"),
         )
         await core.attach_narrative(state["analysis_id"], narrative)
         await core.record_progress(state["analysis_id"], None)
-        await _check_narrative(narrative, packet, state["analysis_id"])
+        await _check_narrative(narrative, packet, state["analysis_id"], language=state.get("language"))
         return {"narrative": narrative}
     except (ScoringUnavailable, ScoringRejected) as exc:
         logger.exception("Analysis %s is delivered, but attaching its narrative failed", state["analysis_id"])
@@ -833,7 +835,7 @@ async def give_up_node(state: dict, store: BaseStore | None = None) -> dict:
 
 
 async def _revise_narrative(
-    analysis_id: str, narrative: str, claims: list[str], packet: dict[str, Any]
+    analysis_id: str, narrative: str, claims: list[str], packet: dict[str, Any], language: str | None = None
 ) -> None:
     """Ask for the sentences to be rewritten, and only keep the rewrite if it
     is actually better.
@@ -850,7 +852,7 @@ async def _revise_narrative(
     that is unsupported. A rewrite that makes it worse is discarded — a second
     model call cannot be allowed to damage an answer already delivered.
     """
-    revista = await _client().revise_narrative(narrative, claims)
+    revista = await _client().revise_narrative(narrative, claims, language=language)
     if not revista:
         observability.record("narrative.revised", False, comment="the revision did not come back")
         return
@@ -884,7 +886,9 @@ async def _revise_narrative(
     )
 
 
-async def _check_narrative(narrative: str | None, packet: dict[str, Any], analysis_id: str = "") -> None:
+async def _check_narrative(
+    narrative: str | None, packet: dict[str, Any], analysis_id: str = "", language: str | None = None
+) -> None:
     """What the text claims, measured against what the evidence holds.
 
     Possible only because no number in the answer comes from a model: the
@@ -934,6 +938,6 @@ async def _check_narrative(narrative: str | None, packet: dict[str, Any], analys
             comment=("none" if not claims else "; ".join(claims)[:500]),
         )
         if claims:
-            await _revise_narrative(analysis_id, narrative, claims, packet)
+            await _revise_narrative(analysis_id, narrative, claims, packet, language)
     except Exception:  # noqa: BLE001 — a measurement must never break what it measures
         logger.exception("Could not check the narrative; the analysis is unaffected")

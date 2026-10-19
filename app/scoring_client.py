@@ -410,7 +410,11 @@ class ScoringClient:
         user_prompt: str | None = None,
         *,
         brand: str | None = None,
+        language: str | None = None,
     ) -> str | None:
+        """`language` is the one the analysis asked for (the buyer's interface
+        language, read back from the record). None leaves it to the scoring
+        service's configured default."""
         body = await self._call(
             "POST",
             "/internal/narrate",
@@ -419,16 +423,21 @@ class ScoringClient:
                 "product_name": product_name,
                 "brand": brand,
                 "user_prompt": user_prompt,
+                "language": language,
             },
         )
         return body.get("narrative")
 
-    async def revise_narrative(self, narrative: str, claims: list[str]) -> str | None:
+    async def revise_narrative(
+        self, narrative: str, claims: list[str], *, language: str | None = None
+    ) -> str | None:
         """Reescreve o texto sem as afirmações que a evidência não sustenta.
         Devolve None quando a revisão não saiu — o texto entregue continua
-        valendo."""
+        valendo. O idioma é o da narrativa, para o pedido de revisão sair nele."""
         body = await self._call(
-            "POST", "/internal/narrate/revise", json={"narrative": narrative, "claims": claims}
+            "POST",
+            "/internal/narrate/revise",
+            json={"narrative": narrative, "claims": claims, "language": language},
         )
         return body.get("narrative")
 

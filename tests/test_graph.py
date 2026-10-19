@@ -17,6 +17,7 @@ def core(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
             "canonical_title": "air fryer",
             "countries": ["ESP", "PRT"],
             "user_prompt": "vale a pena?",
+            "language": "es",
         }
     )
     client.ensure_coverage = AsyncMock(return_value={"tasks": [], "search_terms": ["air fryer"]})
@@ -161,6 +162,9 @@ async def test_it_says_the_explanation_is_coming_before_writing_it(core: AsyncMo
 
     assert core.narrate.await_count == 1
     assert said[writing + 1] is None, "and cleared once it lands, so nothing stale is left behind"
+    # In the language the record asked for — read back at the start, so a
+    # resumed run writes in the same one.
+    assert core.narrate.await_args.kwargs["language"] == "es"
 
 
 async def test_a_failed_narration_leaves_no_stale_line_claiming_it_is_coming(core: AsyncMock) -> None:

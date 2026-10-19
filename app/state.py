@@ -30,6 +30,10 @@ class OrchestratorState(TypedDict, total=False):
     brand_name: str | None
     countries: list[str]
     user_prompt: str | None
+    # The language the narrative comes out in — the buyer's interface
+    # language, read back from the record. None is the scoring service's
+    # configured default.
+    language: str | None
 
     # Decided ONCE, at the start, and carried. An analysis that begins before
     # midnight and resumes after it must not silently change which month it is

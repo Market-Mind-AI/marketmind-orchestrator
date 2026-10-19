@@ -1,10 +1,11 @@
 import asyncio
+import hmac
 import json
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app import spend
@@ -74,7 +75,29 @@ def healthz():
     return {"status": "ok"}
 
 
-@app.post("/run-analysis")
+def require_internal_token(x_internal_token: str | None = Header(default=None)) -> None:
+    """Refuse unless the caller carries the shared secret.
+
+    The same secret this service sends the scoring service on every /internal
+    call, required back on the one call that goes the other way: the scoring
+    service's resume path starts runs here, and a run costs money. Until now
+    anyone who could reach this port could start one.
+
+    With no secret configured every call is refused rather than allowed — the
+    two look the same from outside a running deployment, and only one of them
+    is safe to get wrong. Compared with hmac.compare_digest, so a wrong token
+    takes the same time to reject whatever its prefix.
+    """
+    if not settings.scoring_internal_token:
+        raise HTTPException(
+            status_code=503,
+            detail="SCORING_INTERNAL_TOKEN is not configured, so /run-analysis is closed.",
+        )
+    if x_internal_token is None or not hmac.compare_digest(x_internal_token, settings.scoring_internal_token):
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Internal-Token.")
+
+
+@app.post("/run-analysis", dependencies=[Depends(require_internal_token)])
 async def run_analysis(request: Request):
     payload = await request.json()
 
