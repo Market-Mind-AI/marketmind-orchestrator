@@ -274,6 +274,7 @@ async def _run(analysis_id: str) -> None:
             # dentro de propósito: o span e a contagem ainda estão abertos.
             metrics.token_consumption()
             metrics.demand_cost()
+            metrics.analysis_cost(analysis_id)
     except Exception:  # noqa: BLE001 — nothing left to raise to; the record carries the outcome
         logger.exception("Analysis %s ended in an unhandled error", analysis_id)
         try:

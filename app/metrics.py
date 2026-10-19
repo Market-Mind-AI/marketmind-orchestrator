@@ -29,6 +29,7 @@ TASK_COMPLETION_RATE = "task_completion_rate"
 RESPONSE_LATENCY_SECONDS = "response_latency_seconds"
 TOKEN_CONSUMPTION = "token_consumption"
 DATAFORSEO_COST_USD = "dataforseo_cost_usd"
+ANALYSIS_COST_USD = "analysis_cost_usd"
 TOOL_INVOCATION_ACCURACY = "tool_invocation_accuracy"
 HALLUCINATION_RATE = "hallucination_rate"
 
@@ -174,3 +175,36 @@ def _parse(when: str | None) -> datetime | None:
         logger.debug("Could not read the run's start time from %r", when)
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def analysis_cost(analysis_id: str) -> None:
+    """Everything the run paid for, in one line and one score.
+
+    Models in dollars (priced by the table Langfuse holds, in the service
+    that made each call) plus DataForSEO, which the token figure cannot see.
+    The one number someone asks for — "what did this analysis cost?" —
+    written where it can be read without opening Langfuse:
+
+        COST analysis=<id> total_usd=1.64 models_usd=0.56 (claude-opus-5 0.50, gpt-5.1 0.05)
+            dataforseo_usd=1.08 (12 tasks)
+
+    A call that could not be priced is said, not zeroed: the total is then a
+    floor, and the line says so.
+    """
+    spent = spend.current()
+    breakdown = ", ".join(f"{m} {usd:.4f}" for m, usd in sorted(spent.models_usd.items(), key=lambda kv: -kv[1]))
+    line = (
+        f"COST analysis={analysis_id} total_usd={spent.total_usd:.4f} "
+        f"models_usd={spent.llm_usd:.4f} ({breakdown or 'no priced model call'}) "
+        f"dataforseo_usd={spent.dataforseo_usd:.4f} ({spent.dataforseo_calls} tasks)"
+    )
+    unpriced = spent.llm_calls_without_cost + spent.dataforseo_calls_without_cost
+    if unpriced:
+        line += f" unpriced_calls={unpriced} (the total is a floor)"
+    logger.info(line)
+    comment = f"models {spent.llm_usd:.4f} + DataForSEO {spent.dataforseo_usd:.4f}"
+    if breakdown:
+        comment += f"; {breakdown}"
+    if unpriced:
+        comment += f"; {unpriced} unpriced calls, so a floor"
+    observability.record(ANALYSIS_COST_USD, round(spent.total_usd, 6), comment=comment)

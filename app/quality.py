@@ -255,12 +255,15 @@ async def judge_support(narrative: str, packet: dict[str, Any]) -> dict[str, Any
     # The judge is a model call the run made, so it belongs in the run's token
     # figure. Measuring a thing is not free, and a cost report that leaves out
     # the measuring understates what the run cost.
-    from app import spend
+    from app import pricing, spend
 
     judged = getattr(response, "usage", None)
     prompt_tokens = getattr(judged, "prompt_tokens", None)
     completion_tokens = getattr(judged, "completion_tokens", None)
-    spend.add_call(prompt_tokens, completion_tokens)
+    usage = {"input": prompt_tokens or 0, "output": completion_tokens or 0} if judged is not None else None
+    spend.add_call(
+        prompt_tokens, completion_tokens, model=settings.judge_model, usd=pricing.price(settings.judge_model, usage)
+    )
 
     import json
 

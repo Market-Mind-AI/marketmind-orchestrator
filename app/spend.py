@@ -36,6 +36,13 @@ class Spend:
     # Model calls whose provider reported no figures. Kept apart so a total of
     # zero over several calls reads as "not reported" rather than as "free".
     calls_without_usage: int = 0
+    # What the model calls cost, in USD by the price table Langfuse holds
+    # (the scoring service prices its own and reports them; the judge is
+    # priced here, app/pricing.py); by model, for the breakdown; and how
+    # many calls could not be priced, kept apart because unknown is not free.
+    llm_usd: float = 0.0
+    llm_calls_without_cost: int = 0
+    models_usd: dict[str, float] = field(default_factory=dict)
     # What DataForSEO billed, in USD as it reports it, over the Google Ads
     # tasks this run caused; and how many of those carried no figure.
     dataforseo_usd: float = 0.0
@@ -46,6 +53,18 @@ class Spend:
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
+
+    @property
+    def total_usd(self) -> float:
+        """Models and DataForSEO together — everything the run paid for."""
+        return self.llm_usd + self.dataforseo_usd
+
+    def charge_model(self, model: str, usd: float | None) -> None:
+        if usd is None:
+            self.llm_calls_without_cost += 1
+            return
+        self.llm_usd += usd
+        self.models_usd[model] = self.models_usd.get(model, 0.0) + usd
 
     def __str__(self) -> str:
         parts = [f"{self.input_tokens} in + {self.output_tokens} out over {self.calls} model calls"]
@@ -89,18 +108,30 @@ def add_response(headers: Mapping[str, str]) -> None:
         spend.output_tokens += _as_int(headers.get("X-LLM-Output-Tokens"))
         spend.calls += _as_int(headers.get("X-LLM-Calls"))
         spend.calls_without_usage += _as_int(headers.get("X-LLM-Calls-Without-Usage"))
+        spend.llm_usd += _as_float(headers.get("X-LLM-Cost-USD"))
+        spend.llm_calls_without_cost += _as_int(headers.get("X-LLM-Calls-Without-Cost"))
+        for part in (headers.get("X-LLM-Cost-By-Model") or "").split(","):
+            model, _, usd = part.partition("=")
+            if model and usd:
+                spend.models_usd[model] = spend.models_usd.get(model, 0.0) + _as_float(usd)
     if "X-DataForSEO-Calls" in headers:
         spend.dataforseo_usd += _as_float(headers.get("X-DataForSEO-Cost-USD"))
         spend.dataforseo_calls += _as_int(headers.get("X-DataForSEO-Calls"))
         spend.dataforseo_calls_without_cost += _as_int(headers.get("X-DataForSEO-Calls-Without-Cost"))
 
 
-def add_call(input_tokens: int | None, output_tokens: int | None) -> None:
-    """Add one model call this service made itself. Today that is the judge."""
+def add_call(
+    input_tokens: int | None, output_tokens: int | None, *, model: str | None = None, usd: float | None = None
+) -> None:
+    """Add one model call this service made itself. Today that is the judge.
+    ``usd`` is what it cost by Langfuse's table, or None when unpriced; a
+    call without a ``model`` is not charged at all (the tests' bare calls)."""
     spend = _current.get()
     if spend is None:
         return
     spend.calls += 1
+    if model is not None:
+        spend.charge_model(model, usd)
     if input_tokens is None and output_tokens is None:
         spend.calls_without_usage += 1
         return

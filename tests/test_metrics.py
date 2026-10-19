@@ -294,3 +294,76 @@ def test_an_unreadable_cost_header_adds_nothing_and_breaks_nothing() -> None:
         spend.add_response(httpx.Headers({"X-DataForSEO-Cost-USD": "n/a", "X-DataForSEO-Calls": "1"}))
 
     assert (spent.dataforseo_usd, spent.dataforseo_calls) == (0.0, 1)
+
+
+# --- analysis_cost (2026-10-19) -----------------------------------------------
+#
+# The one number someone asks for. Models in dollars come from the scoring
+# service's headers (it prices its calls by Langfuse's table); the judge is
+# priced here; DataForSEO is what the collector was billed.
+
+
+def test_the_run_cost_is_one_line_with_models_and_dataforseo(caplog) -> None:
+    with spend.tally():
+        spend.add_response(
+            httpx.Headers(
+                {
+                    "X-LLM-Input-Tokens": "20000",
+                    "X-LLM-Output-Tokens": "3000",
+                    "X-LLM-Calls": "3",
+                    "X-LLM-Cost-USD": "0.500000",
+                    "X-LLM-Cost-By-Model": "claude-opus-5=0.500000",
+                    "X-DataForSEO-Cost-USD": "1.080000",
+                    "X-DataForSEO-Calls": "12",
+                }
+            )
+        )
+        spend.add_call(15000, 1000, model="gpt-5.1", usd=0.05)
+        with caplog.at_level(logging.INFO):
+            metrics.analysis_cost("58993b0e")
+
+    line = _lines(caplog)
+    assert (
+        "COST analysis=58993b0e total_usd=1.6300 models_usd=0.5500 (claude-opus-5 0.5000, gpt-5.1 0.0500) "
+        "dataforseo_usd=1.0800 (12 tasks)"
+    ) in line
+    assert "analysis_cost_usd=1.63" in line
+    assert "floor" not in line
+
+
+def test_an_unpriced_call_makes_the_total_a_floor_and_says_so(caplog) -> None:
+    with spend.tally():
+        spend.add_response(
+            httpx.Headers({"X-LLM-Calls": "2", "X-LLM-Cost-USD": "0.100000", "X-LLM-Calls-Without-Cost": "1"})
+        )
+        spend.add_call(100, 10, model="gpt-5.1", usd=None)  # no price table yet
+        with caplog.at_level(logging.INFO):
+            metrics.analysis_cost("a1")
+
+    line = _lines(caplog)
+    assert "total_usd=0.1000" in line
+    assert "unpriced_calls=2 (the total is a floor)" in line
+
+
+def test_a_bare_call_adds_tokens_but_is_not_charged() -> None:
+    """The tests' `add_call(100, 10)` must keep meaning what it meant."""
+    with spend.tally() as spent:
+        spend.add_call(100, 10)
+
+    assert spent.total_tokens == 110
+    assert spent.llm_usd == 0.0 and spent.llm_calls_without_cost == 0
+
+
+def test_the_by_model_header_is_merged_across_responses() -> None:
+    with spend.tally() as spent:
+        spend.add_response(
+            httpx.Headers({"X-LLM-Calls": "1", "X-LLM-Cost-USD": "0.1", "X-LLM-Cost-By-Model": "claude-opus-5=0.1"})
+        )
+        spend.add_response(
+            httpx.Headers(
+                {"X-LLM-Calls": "2", "X-LLM-Cost-USD": "0.3", "X-LLM-Cost-By-Model": "claude-opus-5=0.2,gpt-5.1=0.1"}
+            )
+        )
+
+    assert spent.llm_usd == pytest.approx(0.4)
+    assert spent.models_usd == {"claude-opus-5": pytest.approx(0.3), "gpt-5.1": pytest.approx(0.1)}
