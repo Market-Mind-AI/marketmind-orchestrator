@@ -58,7 +58,8 @@ jobs:
           pip install poetry==2.4.1
           poetry install --no-interaction --no-root
       - name: Run the test suite
-        run: poetry run pytest -q
+        # As a module, so the repository root is on sys.path and `app` imports.
+        run: poetry run python -m pytest -q
 
   build-and-push:
     needs: test
