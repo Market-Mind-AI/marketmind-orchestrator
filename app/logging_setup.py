@@ -3,7 +3,7 @@
 Nothing here configured logging, and uvicorn configures only its own loggers —
 so every `logger.info` in this codebase went to a root logger with no handler
 and was dropped. What was lost is exactly the part worth reading: the search
-terms each country was actually queried for, the five quality measures, and the
+terms each country was actually queried for, the QUALITY measures, and the
 line saying the hallucination judge is not configured. The container printed
 access lines and nothing else.
 

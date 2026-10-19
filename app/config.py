@@ -20,26 +20,15 @@ class Settings(BaseSettings):
     root_path: str = ""
     log_level: str = "INFO"
 
-    worldbank_api_url: str = "http://marketmind-worldbank:8000"
-    oecd_api_url: str = "http://marketmind-oecd:8000"
-    un_api_url: str = "http://marketmind-united-nations-data:8000"
-    pytrends_api_url: str = "http://marketmind-pytrends:8000"
-    llm_api_url: str = "http://marketmind-ollma-llm:8000"
-
     # The scoring service, and the shared secret its /internal tools require.
+    # It is the ONLY service this one talks to: the collectors and the model
+    # gateway sit behind its /internal tools, so their addresses are its
+    # configuration, not this one's.
     # It is still deployed under the name marketmind-core; the DNS name changes
     # when the service is renamed, and this line is the only thing that has to
     # change with it.
     scoring_api_url: str = "http://marketmind-core:8000"
     scoring_internal_token: Optional[str] = None
-
-    # Provider routing: "claude", "gpt", or "ollama"
-    extraction_provider: str = "claude"
-    report_provider: str = "claude"
-
-    # API Keys
-    anthropic_api_key: Optional[str] = None
-    openai_api_key: Optional[str] = None
 
     # --- Durable execution ---
     #

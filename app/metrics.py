@@ -1,8 +1,10 @@
-"""The five measures every run reports, and what each one actually means.
+"""The seven measures every run reports, and what each one actually means.
 
     task_completion_rate       did it deliver what was asked for
     response_latency_seconds   how long the buyer waited for it
-    token_consumption          what it cost to produce
+    token_consumption          how many tokens it took to produce
+    dataforseo_cost_usd        what the demand data cost, as DataForSEO billed it
+    analysis_cost_usd          what the whole run cost, models and data together
     tool_invocation_accuracy   how much of the work was work worth doing
     hallucination_rate         how much of the text is not held up by evidence
 

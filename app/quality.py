@@ -1,7 +1,11 @@
 """What the run is judged on, beyond whether it finished.
 
-Latency and token spend come free from the trace. These are the three that
-need a definition before they can be a number, and the definition is the work.
+Latency, token spend and cost come free from the trace. These are the checks
+that need a definition before they can be a number, and the definition is the
+work: the figures the narrative states that the evidence does not hold
+(unsupported_numbers), the phrases the method forbids (language_violations),
+the tool calls that were not worth making (tool_call_faults), and the
+sentences without a figure that only a second model can check (judge_support).
 
 The hallucination check is only possible because no number in the answer comes
 from a model: the narrative is written from a deterministic evidence packet, so
@@ -185,10 +189,6 @@ def tool_call_faults(coverage_tasks: list[dict[str, Any]], countries: list[str])
 
 
 # --- The judge: for the sentences that carry no number ---
-
-
-class JudgeNotConfigured(RuntimeError):
-    """No judge model is configured, so nothing was judged."""
 
 
 async def judge_support(narrative: str, packet: dict[str, Any]) -> dict[str, Any] | None:

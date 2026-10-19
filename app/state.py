@@ -28,11 +28,8 @@ class OrchestratorState(TypedDict, total=False):
     # metade do par que a narrativa final explica.
     brand_key: str | None
     brand_name: str | None
-    generic_entity_key: str | None
     countries: list[str]
     user_prompt: str | None
-    product_description: str
-    product_image_url: str
 
     # Decided ONCE, at the start, and carried. An analysis that begins before
     # midnight and resumes after it must not silently change which month it is
