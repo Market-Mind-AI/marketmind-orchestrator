@@ -194,6 +194,22 @@ async def test_a_cached_champion_that_still_wins_keeps_the_crown(core: AsyncMock
     core.set_champion.assert_not_awaited()
 
 
+async def test_a_cached_champion_is_delivered_as_a_row_so_the_crown_shows(core: AsyncMock) -> None:
+    """The report draws the crown from the delivered rows. Naming the champion
+    without its row crowned nothing, so every analysis after the first one of
+    the month lost the crown (jamón ibérico, 23/10/2026)."""
+    core.candidates_coverage = AsyncMock(return_value=_cached("BRA", 88.0))
+
+    await build_graph().ainvoke({"analysis_id": "a1"})
+
+    delivered = {row["country"]: row for row in core.complete_analysis.await_args.kwargs["result"]}
+    assert delivered["BRA"]["is_champion"] is True
+    assert delivered["BRA"]["requested"] is False
+    assert delivered["BRA"]["mos"] == 88.0
+    assert len(delivered) == 3, "the requested two plus the champion, once"
+    core.score_candidates.assert_not_awaited()
+
+
 async def test_a_requested_market_that_beats_it_takes_the_crown(core: AsyncMock) -> None:
     """A champion stored at 66.37 stayed crowned in a later analysis where a
     requested market scored 69 — a visibly false claim, and the reason the

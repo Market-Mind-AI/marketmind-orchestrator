@@ -636,7 +636,21 @@ async def champion_node(state: dict) -> dict:
             and (best_requested is None or float(cached_mos) > float(best_requested["mos"]))
         )
         if still_wins:
-            return {"champion_country": cached_country}
+            # The crown is drawn from the delivered rows, so a champion nobody
+            # asked about has to be among them. Returning only its name crowned
+            # nothing: the second analysis of a product in a month showed no
+            # crown at all (jamón ibérico, 23/10/2026: ESP 64.9 stored, absent
+            # from the report). The row carries the stored figure, which is the
+            # same fixed-anchor score the first analysis computed.
+            if cached_country in set(state["countries"]):
+                return {"champion_country": cached_country}
+            row = {
+                "country": cached_country,
+                "mos": float(cached_mos),
+                "availability_status": "available",
+                "excluded_reason": None,
+            }
+            return {"champion_country": cached_country, "mos_results": [*results, row]}
 
         if best_requested is None:
             return {}
