@@ -167,3 +167,10 @@ no collector, and harmless):
 - `docs/superpowers/specs/2026-08-04-marketmind-orchestrator-design.md` and
   `docs/superpowers/plans/2026-08-04-orchestrator-mvp.md` — the original
   design, kept as history; the banner at the top of each says what changed.
+
+## Team
+
+Final project (TFM) for the *Máster en Ingeniería y Desarrollo de Soluciones de IA Generativa* — **EBIS Business Techschool**. The whole system and how to run it: [marketmind-ai](https://github.com/Market-Mind-AI/marketmind-ai).
+
+- **Miguel Antonio Blanco Salcedo** — [@mikews93](https://github.com/mikews93)
+- **Álvaro Augusto De Marco Neto** — [@ironeto](https://github.com/ironeto)
