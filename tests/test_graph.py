@@ -32,6 +32,7 @@ def core(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     )
     client.build_evidence = AsyncMock(return_value={"countries": [{"country": "ESP"}, {"country": "PRT"}]})
     client.narrate = AsyncMock(return_value="Spain leads.")
+    client.language_check = AsyncMock(return_value={"violations": [], "language": "es"})
     monkeypatch.setattr(nodes, "_client", lambda: client)
     return client
 
@@ -323,6 +324,34 @@ async def test_a_narrative_that_obeys_the_rules_reports_nothing(core: AsyncMock,
 
     assert "QUALITY hallucination_rate=0.0" in caplog.text
     assert "narrative.language_violations=0.0" in caplog.text
+
+
+async def test_the_language_rules_are_checked_by_scoring_in_the_narratives_language(
+    core: AsyncMock, caplog
+) -> None:
+    """A copy of the rules here was English-only: a Spanish narrative saying
+    "demanda comprobada" passed unread."""
+    core.narrate = AsyncMock(return_value="Hay demanda comprobada en España.")
+    core.language_check = AsyncMock(
+        return_value={"violations": ['"demanda comprobada": el interés de búsqueda no es demanda'], "language": "es"}
+    )
+
+    with caplog.at_level("INFO"):
+        await build_graph().ainvoke({"analysis_id": "a1"})
+
+    core.language_check.assert_awaited_once_with("Hay demanda comprobada en España.", "es")
+    assert "narrative.language_violations=1.0" in caplog.text
+
+
+async def test_a_language_check_that_fails_does_not_touch_the_delivered_answer(core: AsyncMock) -> None:
+    from app.scoring_client import ScoringUnavailable
+
+    core.language_check = AsyncMock(side_effect=ScoringUnavailable("down"))
+
+    final = await build_graph().ainvoke({"analysis_id": "a1"})
+
+    core.fail_analysis.assert_not_awaited()
+    assert final["narrative"] == "Spain leads."
 
 
 async def test_a_run_that_gave_up_reports_the_same_five(core: AsyncMock, caplog) -> None:

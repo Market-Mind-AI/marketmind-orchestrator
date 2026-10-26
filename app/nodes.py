@@ -690,7 +690,7 @@ async def narrate_node(state: dict) -> dict:
         )
         await core.attach_narrative(state["analysis_id"], narrative)
         await core.record_progress(state["analysis_id"], None)
-        await _check_narrative(narrative, packet)
+        await _check_narrative(narrative, packet, language=state.get("language"))
         return {"narrative": narrative}
     except (ScoringUnavailable, ScoringRejected) as exc:
         logger.exception("Analysis %s is delivered, but attaching its narrative failed", state["analysis_id"])
@@ -739,7 +739,7 @@ async def give_up_node(state: dict) -> dict:
 
 
 
-async def _check_narrative(narrative: str | None, packet: dict[str, Any]) -> None:
+async def _check_narrative(narrative: str | None, packet: dict[str, Any], *, language: str | None = None) -> None:
     """What the text claims, measured against what the evidence holds.
 
     Possible only because no number in the answer comes from a model: the
@@ -749,7 +749,8 @@ async def _check_narrative(narrative: str | None, packet: dict[str, Any]) -> Non
 
     What it cannot reach — sentences that claim something without stating a
     figure — is the Langfuse evaluator's, which reads every `explanation`
-    generation in the trace.
+    generation in the trace. The phrases the method forbids are the method's
+    rules, in the narrative's language, so the scoring service checks those.
 
     Nothing here can fail the analysis. It is already delivered.
     """
@@ -762,7 +763,8 @@ async def _check_narrative(narrative: str | None, packet: dict[str, Any]) -> Non
         unsupported = quality.unsupported_numbers(narrative, packet)
         metrics.hallucination_rate(narrative, packet, unsupported)
 
-        violations = quality.language_violations(narrative)
+        checked = await _client().language_check(narrative, language)
+        violations = list(checked.get("violations") or [])
         observability.record(
             "narrative.language_violations",
             float(len(violations)),

@@ -48,24 +48,6 @@ def test_an_empty_packet_accuses_nothing() -> None:
     assert quality.unsupported_numbers("Spain scores 55", {}) == []
 
 
-# --- the language rules are rules, so no model is asked ---
-
-
-def test_search_interest_may_not_be_called_proven_demand() -> None:
-    violations = quality.language_violations("The data shows proven demand in Spain.")
-
-    assert len(violations) == 1
-    assert "not proven demand" in violations[0]
-
-
-def test_the_score_may_not_be_called_a_guarantee() -> None:
-    assert quality.language_violations("This guarantees a successful entry.")
-
-
-def test_careful_wording_passes() -> None:
-    assert quality.language_violations("Search interest in Spain is moderate and rising.") == []
-
-
 # --- how well the run used its tools ---
 
 

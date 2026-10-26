@@ -462,6 +462,17 @@ class ScoringClient:
         )
         return body.get("narrative")
 
+    async def language_check(self, narrative: str, language: str | None = None) -> dict[str, Any]:
+        """The phrases the method forbids, found in a narrative, by the rules
+        written in the narrative's own language. The rules live next to the
+        narrative's texts; a copy here was English-only and passed every
+        Portuguese and Spanish narrative unread."""
+        return await self._call(
+            "POST",
+            "/internal/narrative/language-check",
+            json={"narrative": narrative, "language": language},
+        )
+
 
 def _detail(response: httpx.Response) -> str:
     try:

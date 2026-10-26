@@ -3,10 +3,11 @@
 Latency, token spend and cost come free from the trace. These are the checks
 that need a definition before they can be a number, and the definition is the
 work: the figures the narrative states that the evidence does not hold
-(unsupported_numbers), the phrases the method forbids (language_violations),
-and the tool calls that were not worth making (tool_call_faults). The
-sentences without a figure are for a second model, and that one is the
-evaluator Langfuse runs on every `explanation` generation, not this service.
+(unsupported_numbers) and the tool calls that were not worth making
+(tool_call_faults). The sentences without a figure are for a second model, and
+that one is the evaluator Langfuse runs on every `explanation` generation, not
+this service. The phrases the method forbids are the method's rules, so they are
+checked by the scoring service, next to the narrative's own texts.
 
 The hallucination check is only possible because no number in the answer comes
 from a model: the narrative is written from a deterministic evidence packet, so
@@ -19,21 +20,6 @@ import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-# Phrases the narrative must not use, and why. These are the language rules the
-# method already commits to; they are rules, not judgement, so they are checked
-# here rather than sent to a model.
-_FORBIDDEN = [
-    (
-        re.compile(r"\b(proven|confirmed|actual|real)\s+demand\b", re.I),
-        "search interest is not proven demand — the sources measure people searching, not people buying",
-    ),
-    (
-        re.compile(r"\bguarantee(s|d)?\b", re.I),
-        "the score is an opportunity reading, never a guarantee",
-    ),
-]
-
 
 def numbers_in(text: str) -> list[float]:
     """Every figure the narrative states.
@@ -151,11 +137,6 @@ def _is_supported(value: float, supported: set[float], tolerance: float) -> bool
                 if held and abs(stated - held) <= abs(held) * _RELATIVE_TOLERANCE:
                     return True
     return False
-
-
-def language_violations(narrative: str) -> list[str]:
-    """Rules the narrative broke. Rules, not judgement — so no model is asked."""
-    return [reason for pattern, reason in _FORBIDDEN if pattern.search(narrative or "")]
 
 
 def tool_call_faults(coverage_tasks: list[dict[str, Any]], countries: list[str]) -> dict[str, int]:
