@@ -306,6 +306,25 @@ class ScoringClient:
             timeout=_collection_timeout(timeout),
         )
 
+    async def demand_absence(
+        self, entity_key: str, countries: list[str], period_key: str, brand_key: str | None = None
+    ) -> dict[str, Any]:
+        """Which of these markets had no demand for this product (and brand),
+        recently — read from the stored data, so it heals itself the moment a
+        source gains volume, inside the demand's own freshness window. A
+        market with a term still to collect is not absent: that is not knowing.
+        Free: nothing is collected."""
+        return await self._call(
+            "POST",
+            "/internal/markets/demand-absence",
+            json={
+                "entity_key": entity_key,
+                "countries": countries,
+                "period_key": period_key,
+                "brand_key": brand_key,
+            },
+        )
+
     async def demand_ceiling(
         self, entity_key: str, countries: list[str], period_key: str, brand_key: str | None = None
     ) -> tuple[float | None, dict[str, Any] | None]:

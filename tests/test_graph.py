@@ -21,6 +21,7 @@ def core(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
         }
     )
     client.ensure_coverage = AsyncMock(return_value={"tasks": [], "search_terms": ["air fryer"]})
+    client.demand_absence = AsyncMock(return_value={"markets": [], "window_days": 30})
     client.candidates_coverage = AsyncMock(return_value={"champion_cached": False})
     client.demand_ceiling = AsyncMock(return_value=(1_500_000.0, {"mode": "reference_candidate"}))
     client.compute_mos = AsyncMock(

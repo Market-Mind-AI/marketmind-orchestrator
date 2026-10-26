@@ -72,14 +72,11 @@ class OrchestratorState(TypedDict, total=False):
     breakdown: dict[str, Any] | None
     narrative: str | None
 
-    # Requested countries answered from long-term memory this round, mapped to
-    # when that memory was recorded -- not accumulated across rounds, because
-    # collection re-checks every requested country each time it runs, so this
-    # is recomputed fresh and is always the current, complete picture. Carried
-    # so give_up can name the date instead of repeating "no data" as if it had
-    # just been discovered, and so the run can report how many markets its own
-    # memory answered instead of collecting.
-    recalled_countries: dict[str, str]
+    # Requested markets the scoring service reported as having had no demand
+    # recently, mapped to when the demand source last answered -- recomputed on
+    # every collection round, never accumulated. Carried so give_up can name
+    # the date instead of repeating "no data" as if it had just been found.
+    absent_countries: dict[str, str]
 
     # How many times the run has gone back to collect a country that is still
     # incomplete. Bounded, because a source that is permanently missing a datum

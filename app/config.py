@@ -67,19 +67,6 @@ class Settings(BaseSettings):
     checkpointer_db_password: Optional[str] = None
     checkpointer_database_url: Optional[str] = None
 
-    # --- Long-term memory ---
-    #
-    # Distinct from the checkpointer above: that is one run's own progress,
-    # this is what the agent knows going INTO a run it has never seen before.
-    # Opened from the same CHECKPOINTER_* connection, so the two behave as a
-    # pair -- CHECKPOINTER=memory yields an in-process store exactly as it
-    # yields an in-process checkpointer.
-    #
-    # How long a "this market is barren" record is trusted before it is
-    # ignored and re-checked. Bounded because a source that gains data later
-    # must not stay hidden behind a memory of when it did not have any.
-    memory_ttl_days: int = 30
-
     @property
     def resolved_checkpointer_url(self) -> Optional[str]:
         if self.checkpointer_database_url:

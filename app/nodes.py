@@ -15,8 +15,6 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from langgraph.store.base import BaseStore
-
 from app import metrics, observability, quality
 from app.config import get_settings
 from app.scoring_client import ScoringClient, ScoringRejected, ScoringUnavailable
@@ -33,91 +31,10 @@ INSIST_FOR = timedelta(hours=24)
 # deadline alone would spend a day discovering it.
 MAX_ATTEMPTS = 3
 
-# Where the agent's long-term memory of barren markets lives. One namespace,
-# shared by every product: the key below carries the entity, so two products
-# never collide in it.
-_BARREN_NAMESPACE = ("markets", "barren")
-
-# Said in give_up_node when a market's absence was just discovered, and reused
-# in _recall_barren_market's caller to recognise it later. Kept as one string
-# rather than re-typed at each call site, so the reason on disk and the reason
-# a fresh discovery reports never drift apart.
+# Said in give_up_node when the sources were just found not to hold a market's
+# data. One string, so the reason on disk and the reason a test looks for do not
+# drift apart.
 _NO_DATA_CAUSE = "the sources do not hold the data for these markets"
-
-
-def _barren_key(entity_key: str, country: str) -> str:
-    return f"{entity_key}:{country}"
-
-
-async def _recall_barren_market(store: BaseStore | None, entity_key: str | None, country: str) -> str | None:
-    """The date this market was last found barren, if that is still trusted.
-
-    A stale record is deleted here, on the way out, rather than left for
-    something else to notice: the whole point of the TTL is that a source
-    which gained data gets tried again, and a record nobody prunes never stops
-    being "remembered".
-
-    Guarded like every store call in this module: memory is an optimisation on
-    top of collection, never a dependency of it. A store that is absent, or one
-    that is down, must leave a run indistinguishable from a run with no memory
-    at all.
-    """
-    if store is None or not entity_key:
-        return None
-    key = _barren_key(entity_key, country)
-    try:
-        item = await store.aget(_BARREN_NAMESPACE, key)
-        if item is None:
-            return None
-        recorded_at = datetime.fromisoformat(item.value["recorded_at"])
-        if datetime.now(UTC) - recorded_at <= timedelta(days=get_settings().memory_ttl_days):
-            return item.value["recorded_at"]
-        await store.adelete(_BARREN_NAMESPACE, key)
-        return None
-    except Exception:  # noqa: BLE001 — memory must never fail an analysis
-        logger.debug("Could not read the market memory for %s", key, exc_info=True)
-        return None
-
-
-async def _forget_barren_market(store: BaseStore | None, entity_key: str | None, country: str) -> None:
-    """A market that just scored heals its own memory.
-
-    Called for every scored country, not only ones known to be remembered: the
-    store's own delete is a no-op on a key that was never written, and checking
-    first would just be a second guarded call instead of one.
-    """
-    if store is None or not entity_key:
-        return
-    try:
-        await store.adelete(_BARREN_NAMESPACE, _barren_key(entity_key, country))
-    except Exception:  # noqa: BLE001 — memory must never fail an analysis
-        logger.debug("Could not forget the market memory for %s:%s", entity_key, country, exc_info=True)
-
-
-async def _remember_barren_markets(
-    store: BaseStore | None, entity_key: str | None, countries: list[str], analysis_id: str
-) -> None:
-    """One record per country the sources were just found not to hold.
-
-    Only ever called with countries this run actually collected and found
-    empty -- never ones already known from memory, which were not re-checked
-    this run and whose TTL a rewrite would reset without new evidence.
-    """
-    if store is None or not entity_key:
-        return
-    for country in countries:
-        try:
-            await store.aput(
-                _BARREN_NAMESPACE,
-                _barren_key(entity_key, country),
-                {
-                    "recorded_at": datetime.now(UTC).isoformat(),
-                    "analysis_id": analysis_id,
-                    "cause": _NO_DATA_CAUSE,
-                },
-            )
-        except Exception:  # noqa: BLE001 — memory must never fail an analysis
-            logger.debug("Could not remember %s as barren for %s", country, entity_key, exc_info=True)
 
 
 def _client() -> ScoringClient:
@@ -297,17 +214,21 @@ async def enrich_node(state: dict) -> dict:
     return {}
 
 
-async def collect_node(state: dict, store: BaseStore | None = None) -> dict:
+async def collect_node(state: dict) -> dict:
     """Collect what each country is missing, and keep the tasks.
 
     The tasks are what the next decision is made on. A country that comes back
     incomplete is either waiting on a source that is down -- insist -- or
     reading a source that does not hold the datum -- declare it and move on.
 
-    Checked against memory first, one country at a time: a market already
-    known barren is declared without spending the collection round -- the
-    slowest part of this, sometimes several retries against a source -- that
-    would only rediscover the same nothing.
+    The scoring service is asked first which markets had no demand recently: a
+    market whose every search term was answered with nothing inside the
+    demand's freshness window is declared without spending the collection
+    round -- the slowest part of this, sometimes several retries against a
+    source -- that would only rediscover the same nothing. That answer is read
+    from the data, per product AND brand, and heals itself when a source gains
+    volume; the memory this replaces was keyed by product alone and trusted for
+    a window of its own.
     """
     core = _client()
     analysis_id = state["analysis_id"]
@@ -318,11 +239,9 @@ async def collect_node(state: dict, store: BaseStore | None = None) -> dict:
     reaproveitado: dict[str, int] = {}
     sem_cobertura: dict[str, list[str]] = {}
     relacionadas_frescas = 0
-    recalled: dict[str, str] = {}
+    absent = await _absent_markets(core, state)
     for country in state["countries"]:
-        recorded_at = await _recall_barren_market(store, entity_key, country)
-        if recorded_at is not None:
-            recalled[country] = recorded_at
+        if country in absent:
             continue
 
         await core.record_progress(analysis_id, f"collecting {country}")
@@ -367,7 +286,28 @@ async def collect_node(state: dict, store: BaseStore | None = None) -> dict:
     _note_fontes(
         tasks, reused=reaproveitado, not_covering=sem_cobertura, related_fresh=relacionadas_frescas
     )
-    return {"coverage_tasks": tasks, "countries_collected": collected, "recalled_countries": recalled}
+    return {"coverage_tasks": tasks, "countries_collected": collected, "absent_countries": absent}
+
+
+async def _absent_markets(core: ScoringClient, state: dict) -> dict[str, str]:
+    """The requested markets with no recent demand, mapped to when that was
+    last checked. Best effort: an answer that does not come means collecting
+    everything, which is what a run did before it could ask."""
+    entity_key = state.get("entity_key")
+    if not entity_key:
+        return {}
+    try:
+        answer = await core.demand_absence(
+            entity_key, state["countries"], state["period_key"], state.get("brand_key")
+        )
+    except (ScoringUnavailable, ScoringRejected) as exc:
+        logger.warning("Could not ask which markets lack demand; collecting all of them: %s", exc)
+        return {}
+    return {
+        market["country"]: market.get("checked_at") or ""
+        for market in answer.get("markets") or []
+        if market.get("absent") and market.get("country") in set(state["countries"])
+    }
 
 
 # Os nomes das fontes como uma pessoa as chama, não como o enum as escreve.
@@ -542,13 +482,8 @@ async def measure_node(state: dict) -> dict:
     return {}
 
 
-async def score_node(state: dict, store: BaseStore | None = None) -> dict:
-    """Compute the MOS. No arithmetic happens here; it happens where it is versioned.
-
-    A market that scores forgets its own barren memory here: a source that
-    gains data is caught on the very first successful run after that, and a
-    wrong memory cannot outlive the fact.
-    """
+async def score_node(state: dict) -> dict:
+    """Compute the MOS. No arithmetic happens here; it happens where it is versioned."""
     entity_key = state.get("entity_key")
     if not entity_key:
         return {"mos_results": []}
@@ -558,11 +493,6 @@ async def score_node(state: dict, store: BaseStore | None = None) -> dict:
     results = await core.compute_mos(
         entity_key, state["countries"], state["period_key"], state.get("brand_key")
     )
-
-    for row in results:
-        if row.get("mos") is not None and row.get("country"):
-            await _forget_barren_market(store, entity_key, row["country"])
-
     return {"mos_results": results, "attempts": state.get("attempts", 0) + 1}
 
 
@@ -726,10 +656,10 @@ async def deliver_node(state: dict) -> dict:
     # comprador, que termina quando a resposta sai.
     metrics.tool_invocation_accuracy(state.get("coverage_tasks") or [], list(requested))
     observability.record("analysis.attempts", float(state.get("attempts", 1)))
-    # How much of this run memory answered instead of collecting -- 0 on a
-    # first analysis, the count of barren markets on a repeat. The measure
-    # that shows memory changing behaviour, not just existing.
-    observability.record("recall_hits", float(len(state.get("recalled_countries") or {})))
+    # How many markets were declared from the scoring service's record of no
+    # recent demand instead of collected -- the measure that shows the skip
+    # changing behaviour, not just existing.
+    observability.record("absent_markets_skipped", float(len(state.get("absent_countries") or {})))
     return {}
 
 
@@ -768,38 +698,27 @@ async def narrate_node(state: dict) -> dict:
         return {"errors": [f"narration failed: {exc}"]}
 
 
-async def give_up_node(state: dict, store: BaseStore | None = None) -> dict:
+async def give_up_node(state: dict) -> dict:
     """End the run with a reason, rather than delivering part of a comparison.
 
     Which countries, and why each one. A failure nobody can read is the one the
     buyer asks about, and "it failed" does not say whether to try again in an
     hour or never.
-
-    Only the "sources do not hold the data" cause is remembered. The other two
-    are about the world being temporarily broken -- an outage, a deadline --
-    and recording either as a fact about the product would make a bad day
-    look like a permanent absence.
     """
     missing = incomplete_countries(state)
-    recalled = state.get("recalled_countries") or {}
+    absent = state.get("absent_countries") or {}
 
     if _past_deadline(state):
         cause = "the sources stayed unavailable for the full retry window"
     elif _has_transient_failure(state, missing):
         cause = f"collection kept failing after {state.get('attempts', 0)} attempts"
-    elif missing and all(country in recalled for country in missing):
-        # Memory speaking, not a fresh check: the buyer is owed the date this
-        # was actually last verified, not "no data" repeated as if collection
-        # had just run and found the same thing again.
-        dates = sorted({recalled[country][:10] for country in missing})
-        cause = f"no data when this was last checked, on {', '.join(dates)}"
+    elif missing and all(country in absent for country in missing):
+        # Not a fresh check: the buyer is owed the date the demand source last
+        # answered, not "no data" repeated as if collection had just run.
+        dates = sorted({absent[country][:10] for country in missing if absent[country]})
+        cause = "no search demand when this was last checked" + (f", on {', '.join(dates)}" if dates else "")
     else:
         cause = _NO_DATA_CAUSE
-        # Only the countries collected and found empty THIS run. One already
-        # known from memory was not re-verified here, so writing it again would
-        # reset a TTL that exists precisely to force a real recheck eventually.
-        newly_barren = [country for country in missing if country not in recalled]
-        await _remember_barren_markets(store, state.get("entity_key"), newly_barren, state["analysis_id"])
 
     reason = f"Analysis incomplete for {', '.join(missing) or 'every requested market'}: {cause}."
     await _client().fail_analysis(state["analysis_id"], reason)
@@ -815,7 +734,7 @@ async def give_up_node(state: dict, store: BaseStore | None = None) -> dict:
     # Ver a nota em deliver_node: o consumo é reportado no fim, em public._run.
     metrics.tool_invocation_accuracy(state.get("coverage_tasks") or [], list(requested))
     observability.record("analysis.attempts", float(state.get("attempts", 1)))
-    observability.record("recall_hits", float(len(recalled)))
+    observability.record("absent_markets_skipped", float(len(absent)))
     return {"errors": [reason]}
 
 
