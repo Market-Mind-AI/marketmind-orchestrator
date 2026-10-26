@@ -9,6 +9,13 @@ import pytest
 from app import metrics, spend
 
 
+def _llm(input_tokens: int, output_tokens: int) -> httpx.Headers:
+    """One model call, as the scoring service reports it on its headers."""
+    return httpx.Headers(
+        {"X-LLM-Input-Tokens": str(input_tokens), "X-LLM-Output-Tokens": str(output_tokens), "X-LLM-Calls": "1"}
+    )
+
+
 def _lines(caplog) -> str:
     return caplog.text
 
@@ -72,7 +79,7 @@ def test_tokens_are_summed_across_every_call_the_run_made(caplog) -> None:
         spend.add_response(
             httpx.Headers({"X-LLM-Input-Tokens": "800", "X-LLM-Output-Tokens": "100", "X-LLM-Calls": "2"})
         )
-        spend.add_call(500, 50)  # the judge, called by this service itself
+        spend.add_response(_llm(500, 50))
         with caplog.at_level(logging.INFO):
             metrics.token_consumption()
 
@@ -102,9 +109,9 @@ def test_a_provider_that_reported_no_figures_is_visible_as_such() -> None:
 
 def test_one_run_never_sees_another_run_s_tokens() -> None:
     with spend.tally() as first:
-        spend.add_call(100, 10)
+        spend.add_response(_llm(100, 10))
     with spend.tally() as second:
-        spend.add_call(5, 1)
+        spend.add_response(_llm(5, 1))
 
     assert first.total_tokens == 110
     assert second.total_tokens == 6
@@ -189,7 +196,7 @@ async def test_two_runs_at_once_do_not_share_a_tally() -> None:
     async def run(calls: int, tokens: int) -> int:
         with spend.tally() as spent:
             for _ in range(calls):
-                spend.add_call(tokens, 0)
+                spend.add_response(_llm(tokens, 0))
                 await asyncio.sleep(0)  # let the other run interleave here
             return spent.total_tokens
 
@@ -283,7 +290,7 @@ def test_a_run_that_collected_no_demand_data_says_so(caplog) -> None:
 
 def test_the_spend_summary_names_the_dataforseo_dollars_too() -> None:
     with spend.tally() as spent:
-        spend.add_call(100, 10)
+        spend.add_response(_llm(100, 10))
         spend.add_response(httpx.Headers({"X-DataForSEO-Cost-USD": "0.05", "X-DataForSEO-Calls": "1"}))
 
     assert str(spent) == "100 in + 10 out over 1 model calls; $0.0500 at DataForSEO over 1 tasks"
@@ -299,8 +306,8 @@ def test_an_unreadable_cost_header_adds_nothing_and_breaks_nothing() -> None:
 # --- analysis_cost (2026-10-19) -----------------------------------------------
 #
 # The one number someone asks for. Models in dollars come from the scoring
-# service's headers (it prices its calls by Langfuse's table); the judge is
-# priced here; DataForSEO is what the collector was billed.
+# service's headers (it prices its calls by Langfuse's table); DataForSEO is
+# what the collector was billed.
 
 
 def test_the_run_cost_is_one_line_with_models_and_dataforseo(caplog) -> None:
@@ -318,16 +325,15 @@ def test_the_run_cost_is_one_line_with_models_and_dataforseo(caplog) -> None:
                 }
             )
         )
-        spend.add_call(15000, 1000, model="gpt-5.1", usd=0.05)
         with caplog.at_level(logging.INFO):
             metrics.analysis_cost("58993b0e")
 
     line = _lines(caplog)
     assert (
-        "COST analysis=58993b0e total_usd=1.6300 models_usd=0.5500 (claude-opus-5 0.5000, gpt-5.1 0.0500) "
+        "COST analysis=58993b0e total_usd=1.5800 models_usd=0.5000 (claude-opus-5 0.5000) "
         "dataforseo_usd=1.0800 (12 tasks)"
     ) in line
-    assert "analysis_cost_usd=1.63" in line
+    assert "analysis_cost_usd=1.58" in line
     assert "floor" not in line
 
 
@@ -336,22 +342,12 @@ def test_an_unpriced_call_makes_the_total_a_floor_and_says_so(caplog) -> None:
         spend.add_response(
             httpx.Headers({"X-LLM-Calls": "2", "X-LLM-Cost-USD": "0.100000", "X-LLM-Calls-Without-Cost": "1"})
         )
-        spend.add_call(100, 10, model="gpt-5.1", usd=None)  # no price table yet
         with caplog.at_level(logging.INFO):
             metrics.analysis_cost("a1")
 
     line = _lines(caplog)
     assert "total_usd=0.1000" in line
-    assert "unpriced_calls=2 (the total is a floor)" in line
-
-
-def test_a_bare_call_adds_tokens_but_is_not_charged() -> None:
-    """The tests' `add_call(100, 10)` must keep meaning what it meant."""
-    with spend.tally() as spent:
-        spend.add_call(100, 10)
-
-    assert spent.total_tokens == 110
-    assert spent.llm_usd == 0.0 and spent.llm_calls_without_cost == 0
+    assert "unpriced_calls=1 (the total is a floor)" in line
 
 
 def test_the_by_model_header_is_merged_across_responses() -> None:

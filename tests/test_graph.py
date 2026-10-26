@@ -360,24 +360,6 @@ async def test_a_narrative_that_obeys_the_rules_reports_nothing(core: AsyncMock,
     assert "narrative.language_violations=0.0" in caplog.text
 
 
-async def test_with_no_judge_configured_the_run_says_so_and_carries_on(
-    core: AsyncMock, caplog, monkeypatch
-) -> None:
-    """Asked for explicitly: do not run that part, and say it is not
-    configured — rather than failing, or leaving a silent gap."""
-    monkeypatch.delenv("JUDGE_API_KEY", raising=False)
-    monkeypatch.setenv("JUDGE_SAMPLE_RATE", "1.0")
-
-    with caplog.at_level("INFO"):
-        await build_graph().ainvoke({"analysis_id": "a1"})
-
-    assert "judge is not configured" in caplog.text
-    assert "narrative.unsupported_claims" not in caplog.text, (
-        "no score at all — an absent judgement must not read as a clean one"
-    )
-    core.complete_analysis.assert_awaited_once()
-
-
 async def test_a_run_that_gave_up_reports_the_same_five(core: AsyncMock, caplog) -> None:
     """Measured on the runs that failed too. A completion rate read only off the
     runs that completed is always 1.0, and a latency read only off those hides
@@ -416,7 +398,7 @@ async def test_every_measure_of_a_full_run_lands_inside_the_trace(core, monkeypa
     Por isso este teste não olha texto de log. Ele afirma que cada medição
     aconteceu com um span ABERTO, que é a condição de chegar ao lugar certo.
     """
-    from app import observability, quality
+    from app import observability
 
     aberto = {"span": False}
     registrados: list[tuple[str, str, bool]] = []
@@ -442,7 +424,6 @@ async def test_every_measure_of_a_full_run_lands_inside_the_trace(core, monkeypa
 
     monkeypatch.setattr(observability, "_handler", lambda: object())
     monkeypatch.setattr("langfuse.get_client", lambda: _ClienteFalso())
-    monkeypatch.setattr(quality, "judge_support", AsyncMock(return_value=None))
 
     # Exatamente o que public._run faz em produção, incluindo a contagem de
     # tokens no FIM — que é onde ela passou a ser feita.
@@ -468,10 +449,14 @@ async def test_what_the_narrative_spends_is_counted(core: AsyncMock, caplog) -> 
 
     Aqui a narrativa gasta, como gasta em produção, e o total tem de vê-la.
     """
+    import httpx
+
     from app import spend
 
     async def _narrar(*_args, **_kwargs) -> str:  # noqa: ANN002, ANN003
-        spend.add_call(1200, 800)
+        spend.add_response(
+            httpx.Headers({"X-LLM-Input-Tokens": "1200", "X-LLM-Output-Tokens": "800", "X-LLM-Calls": "1"})
+        )
         return "Spain leads."
 
     core.narrate = _narrar

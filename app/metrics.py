@@ -73,8 +73,8 @@ def response_latency_seconds(started_at: str | None, *, what: str = "answer deli
 def token_consumption() -> None:
     """Everything the run spent on models, wherever the call was made.
 
-    Mostly in the scoring service, which reports each response's spend on its
-    headers; the judge is the one model this service calls itself.
+    All of it in the scoring service, which reports each response's spend on
+    its headers; this service calls no model itself.
     """
     spent = spend.current()
     if not spent.calls:
@@ -146,9 +146,9 @@ def hallucination_rate(narrative: str | None, packet: dict[str, Any], unsupporte
     narrative that says nothing measurable has nothing to hallucinate and is
     reported as such rather than as clean.
 
-    The judge covers what this cannot reach — claims made without a figure —
-    and is recorded separately, because a sampled signal and an exact one must
-    not be averaged into a single number.
+    The Langfuse evaluator covers what this cannot reach — claims made without
+    a figure — and is recorded there, because a model's verdict and an exact
+    check must not be averaged into a single number.
     """
     stated = quality.numbers_in(narrative or "")
     if not stated:

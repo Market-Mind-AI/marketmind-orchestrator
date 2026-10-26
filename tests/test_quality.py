@@ -1,7 +1,5 @@
 """The three measures that need a definition before they can be a number."""
 
-import pytest
-
 from app import quality
 
 _PACKET = {
@@ -93,44 +91,6 @@ def test_a_clean_run_counts_nothing() -> None:
     assert faults == {"redundant": 0, "off_request": 0}
 
 
-# --- the judge is optional, and its absence is never a failure ---
-
-
-async def test_no_judge_configured_means_no_judgement_not_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The analysis is finished and correct either way. A missing judge means
-    one signal is absent, not that anything is wrong."""
-    monkeypatch.delenv("JUDGE_API_KEY", raising=False)
-
-    assert await quality.judge_support("anything", _PACKET) is None
-
-
-async def test_no_judge_configured_says_so(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    """Said out loud, so an empty score is never mistaken for a clean one."""
-    monkeypatch.delenv("JUDGE_API_KEY", raising=False)
-
-    with caplog.at_level("INFO"):
-        await quality.judge_support("anything", _PACKET)
-
-    assert "not configured" in caplog.text
-    assert "deterministic checks" in caplog.text
-
-
-async def test_a_judge_that_cannot_be_reached_does_not_fail_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("JUDGE_API_KEY", "sk-test")
-
-    class _Boom:
-        def __init__(self, **kwargs: object) -> None:
-            pass
-
-        @property
-        def chat(self):  # noqa: ANN201
-            raise RuntimeError("unreachable")
-
-    monkeypatch.setattr("openai.AsyncOpenAI", _Boom)
-
-    assert await quality.judge_support("anything", _PACKET) is None
-
-
 def test_a_population_restated_in_millions_is_the_same_figure() -> None:
     """Real, from a Brazilian narrative: it wrote the exact 212.812.405 the
     packet holds and then restated it as "212,8 milhões". The checker read the
@@ -167,90 +127,3 @@ def test_a_score_is_still_checked_tightly() -> None:
 
     assert unsupported_numbers("Spain scores 40.", packet) == []
     assert unsupported_numbers("Spain scores 44.", packet) == [44.0]
-
-
-# --- the judge is a generation in the run's trace (2026-10-19) ---------------
-
-
-class _FakeOpenAI:
-    """The judge's provider, answering with a fixed verdict and usage."""
-
-    def __init__(self, **kwargs: object) -> None:
-        pass
-
-    @property
-    def chat(self):  # noqa: ANN201
-        from types import SimpleNamespace
-
-        class _Completions:
-            async def create(self, **kwargs):  # noqa: ANN001, ANN202
-                return SimpleNamespace(
-                    usage=SimpleNamespace(prompt_tokens=800, completion_tokens=40),
-                    choices=[
-                        SimpleNamespace(
-                            message=SimpleNamespace(content='{"supported": true, "unsupported_claims": []}')
-                        )
-                    ],
-                )
-
-        return SimpleNamespace(completions=_Completions())
-
-
-@pytest.fixture
-def traced(monkeypatch: pytest.MonkeyPatch):
-    """Tracing configured, with a fake Langfuse client standing in."""
-    from unittest.mock import MagicMock, patch
-
-    from app import observability
-
-    monkeypatch.setenv("JUDGE_API_KEY", "sk-test")
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
-    observability._handler.cache_clear()
-    cliente = MagicMock()
-    with patch("langfuse.get_client", return_value=cliente):
-        yield cliente
-    observability._handler.cache_clear()
-
-
-async def test_the_judge_is_traced_as_a_generation_with_its_tokens(monkeypatch: pytest.MonkeyPatch, traced) -> None:
-    monkeypatch.setattr("openai.AsyncOpenAI", _FakeOpenAI)
-
-    verdict = await quality.judge_support("anything", _PACKET)
-
-    assert verdict == {"supported": True, "unsupported_claims": []}
-    opened = traced.start_observation.call_args.kwargs
-    assert opened["name"] == "narrative_judge" and opened["as_type"] == "generation"
-    generation = traced.start_observation.return_value
-    assert generation.update.call_args.kwargs["usage_details"] == {"input": 800, "output": 40}
-    assert "level" not in generation.update.call_args.kwargs
-    generation.end.assert_called_once()
-
-
-async def test_a_judge_that_fails_is_an_error_generation(monkeypatch: pytest.MonkeyPatch, traced) -> None:
-    class _Boom(_FakeOpenAI):
-        @property
-        def chat(self):  # noqa: ANN201
-            raise RuntimeError("unreachable")
-
-    monkeypatch.setattr("openai.AsyncOpenAI", _Boom)
-
-    assert await quality.judge_support("anything", _PACKET) is None
-
-    generation = traced.start_observation.return_value
-    assert generation.update.call_args.kwargs["level"] == "ERROR"
-    assert generation.update.call_args.kwargs["status_message"] == "RuntimeError: unreachable"
-
-
-async def test_without_tracing_the_judge_opens_no_generation(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app import observability
-
-    monkeypatch.setenv("JUDGE_API_KEY", "sk-test")
-    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
-    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
-    monkeypatch.setattr("openai.AsyncOpenAI", _FakeOpenAI)
-    observability._handler.cache_clear()
-    try:
-        assert await quality.judge_support("anything", _PACKET) == {"supported": True, "unsupported_claims": []}
-    finally:
-        observability._handler.cache_clear()

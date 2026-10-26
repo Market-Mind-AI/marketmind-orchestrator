@@ -25,15 +25,6 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-async def _keep_prices_loaded() -> None:
-    from app import pricing
-
-    while tracing_enabled() and not pricing.loaded():
-        await asyncio.to_thread(pricing.load)
-        if not pricing.loaded():
-            await asyncio.sleep(60)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # The checkpointer holds a connection pool, so it lives as long as the
@@ -55,13 +46,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             # Said once, at startup. Discovering it while trying to explain a
             # bad run is discovering it too late.
             logger.warning("Langfuse is not configured; runs will not be traced.")
-        # The model price table, read from Langfuse (app/pricing.py) so the
-        # judge's call is priced into the run's total. From a thread, retried
-        # until Langfuse answers, never holding the port closed.
-        app.state.price_watch = asyncio.create_task(_keep_prices_loaded())
         yield
         app.state.orphan_watch.cancel()
-        app.state.price_watch.cancel()
 
 
 app = FastAPI(title="MarketMind Orchestrator", root_path=settings.root_path, lifespan=lifespan)

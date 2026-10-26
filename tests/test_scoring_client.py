@@ -153,16 +153,6 @@ async def test_the_narrative_is_asked_for_in_the_analysis_language() -> None:
 
 
 @respx.mock
-async def test_the_revision_is_asked_for_in_the_same_language() -> None:
-    route = respx.post(f"{_BASE}/internal/narrate/revise").mock(
-        return_value=httpx.Response(200, json={"narrative": "Texto revisado"})
-    )
-
-    assert await _client().revise_narrative("España es la mejor apuesta.", ["no cubre costes"], language="es")
-    assert json.loads(route.calls.last.request.content)["language"] == "es"
-
-
-@respx.mock
 async def test_a_champion_can_be_recorded_as_nothing_scorable() -> None:
     route = respx.post(f"{_BASE}/internal/champion").mock(return_value=httpx.Response(200, json={}))
 
