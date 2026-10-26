@@ -145,9 +145,8 @@ async def test_the_deadline_is_sent_when_the_run_starts() -> None:
 
 
 @respx.mock
-async def test_a_cached_champion_comes_back_with_its_figure_not_just_the_fact() -> None:
-    """The figure decides whether it is still a champion. A stored one that a
-    requested market now beats has to be replaced, not crowned again."""
+async def test_a_skipped_candidate_collection_says_so() -> None:
+    """Reported, not acted on: who the champion is comes from /champion/crown."""
     respx.post(f"{_BASE}/internal/candidates/coverage").mock(
         return_value=httpx.Response(
             200, json={"entity_key": "e1", "champion_cached": True, "champion_country": "BRA", "champion_mos": 66.37}
@@ -202,16 +201,27 @@ async def test_the_narrative_is_asked_for_in_the_analysis_language() -> None:
 
 
 @respx.mock
-async def test_a_champion_can_be_recorded_as_nothing_scorable() -> None:
-    route = respx.post(f"{_BASE}/internal/champion").mock(return_value=httpx.Response(200, json={}))
+async def test_the_crown_is_asked_with_the_requested_rows_and_comes_back_whole() -> None:
+    route = respx.post(f"{_BASE}/internal/champion/crown").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "champion_country": "BRA",
+                "champion_mos": 66.37,
+                "requested": False,
+                "champion_row": {"country": "BRA", "mos": 66.37},
+                "from_cache": True,
+                "demand_ceiling": 15800.0,
+            },
+        )
+    )
 
-    await _client().set_champion("e1", "2026-09", country=None, mos=None)
-
-    import json
+    crowned = await _client().crown_champion("e1", "2026-09", ["ESP"], [{"country": "ESP", "mos": 60.0}])
 
     body = json.loads(route.calls.last.request.content)
-    assert body["country"] is None
     assert body["period_key"] == "2026-09"
+    assert body["requested_results"] == [{"country": "ESP", "mos": 60.0}]
+    assert crowned["champion_row"]["country"] == "BRA"
 
 
 @respx.mock

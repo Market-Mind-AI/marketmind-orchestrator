@@ -475,12 +475,14 @@ async def ruler_node(state: dict) -> dict:
     The ceiling is the largest real search volume among the product's reference
     markets, so those are collected regardless of what was asked about. That is
     what keeps the ruler from moving with the query -- and when the period's
-    champion is already known, the collection is skipped entirely, because it is
-    the slowest work in the system and it produces the same answer.
+    champion is already known against the current ruler, the scoring service
+    skips the collection, because it is the slowest work in the system and it
+    produces the same answer. Who the champion is, is not read here: that is
+    /champion/crown's answer, after the countries are scored.
     """
     entity_key = state.get("entity_key")
     if not entity_key:
-        return {"demand_ceiling": None, "demand_ruler": None, "champion_cached": False}
+        return {"demand_ceiling": None, "demand_ruler": None}
 
     core = _client()
     await core.record_progress(state["analysis_id"], "settling the demand ruler")
@@ -503,7 +505,7 @@ async def ruler_node(state: dict) -> dict:
                 "skipped entirely: this period's champion is already known, and "
                 "re-collecting the reference markets produces the same answer"
             ),
-            detail={"champion_cached": True, "champion_country": known.get("champion_country")},
+            detail={"champion_cached": True},
         )
     else:
         _note_fontes(
@@ -515,13 +517,7 @@ async def ruler_node(state: dict) -> dict:
     ceiling, ruler = await core.demand_ceiling(
         entity_key, state["countries"], state["period_key"], state.get("brand_key")
     )
-    return {
-        "champion_cached": bool(known.get("champion_cached")),
-        "cached_champion_country": known.get("champion_country"),
-        "cached_champion_mos": known.get("champion_mos"),
-        "demand_ceiling": ceiling,
-        "demand_ruler": ruler,
-    }
+    return {"demand_ceiling": ceiling, "demand_ruler": ruler}
 
 
 async def measure_node(state: dict) -> dict:
@@ -635,13 +631,15 @@ def after_scoring(state: dict) -> str:
 
 
 async def champion_node(state: dict) -> dict:
-    """Surface the product's best market, so the request can be benchmarked.
+    """Ask the scoring service for the product's best market, so the request
+    can be benchmarked.
 
-    The MOS uses fixed anchors, so scoring markets nobody asked about never
-    changes what a requested one scores. When the best of them beats every
-    requested market, it is worth showing; when a requested market beats the
-    stored champion, the stored one is replaced, because leaving a beaten
-    champion in place keeps it wrong for every analysis after.
+    Crowning is its decision, not this one's: it holds the demand ruler, and a
+    stored champion only counts when it was measured against the current one.
+    Deciding it here read the stored champion in one call and crowned it after
+    the ruler had moved in the next. What comes back is used as it is — when
+    the champion was not asked about, its row joins the delivered ones, because
+    the crown is drawn from the rows the buyer receives.
     """
     entity_key = state.get("entity_key")
     results = state.get("mos_results") or []
@@ -650,81 +648,23 @@ async def champion_node(state: dict) -> dict:
 
     core = _client()
     await core.record_progress(state["analysis_id"], "looking for the product's best market")
-    scored = [r for r in results if r.get("mos") is not None]
-    best_requested = max(scored, key=lambda r: float(r["mos"]), default=None)
-
-    if state.get("champion_cached"):
-        # The crown means "beats everything you asked about". A stored champion
-        # that a requested market now beats is not one, and saying otherwise
-        # produced a visibly false claim once: a champion stored at 66.37 stayed
-        # crowned in a later analysis where a requested market scored 69.
-        cached_country = state.get("cached_champion_country")
-        cached_mos = state.get("cached_champion_mos")
-        still_wins = (
-            cached_country is not None
-            and cached_mos is not None
-            and (best_requested is None or float(cached_mos) > float(best_requested["mos"]))
-        )
-        if still_wins:
-            # The crown is drawn from the delivered rows, so a champion nobody
-            # asked about has to be among them. Returning only its name crowned
-            # nothing: the second analysis of a product in a month showed no
-            # crown at all (jamón ibérico, 23/10/2026: ESP 64.9 stored, absent
-            # from the report). The row carries the stored figure, which is the
-            # same fixed-anchor score the first analysis computed.
-            if cached_country in set(state["countries"]):
-                return {"champion_country": cached_country}
-            row = {
-                "country": cached_country,
-                "mos": float(cached_mos),
-                "availability_status": "available",
-                "excluded_reason": None,
-            }
-            return {"champion_country": cached_country, "mos_results": [*results, row]}
-
-        if best_requested is None:
-            return {}
-
-        # Promoted, not merely displaced. The stored value means "this product's
-        # best known market", so leaving a beaten one in place keeps it wrong
-        # for every analysis after this one — a later request for two other
-        # markets would reload it and crown it again. Cheap: the numbers are
-        # already in hand and no candidate collection is involved.
-        await core.set_champion(
-            entity_key,
-            state["period_key"],
-            country=best_requested["country"],
-            mos=float(best_requested["mos"]),
-            brand_key=state.get("brand_key"),
-        )
-        return {"champion_country": best_requested["country"]}
-
-    candidates = await core.score_candidates(
+    crowned = await core.crown_champion(
         entity_key,
+        state["period_key"],
         state["countries"],
-        state["period_key"],
-        state.get("demand_ceiling"),
+        results,
         state.get("brand_key"),
-    )
-    everything = [*scored, *[c for c in candidates if c.get("mos") is not None]]
-    champion = max(everything, key=lambda r: float(r["mos"]), default=None)
-
-    # Recorded even when nothing could be scored: the period is what marks the
-    # work as done, so "nothing scorable this month" has to be stored or the
-    # same fruitless collection runs on every later analysis.
-    await core.set_champion(
-        entity_key,
-        state["period_key"],
-        country=champion["country"] if champion else None,
-        mos=float(champion["mos"]) if champion else None,
-        brand_key=state.get("brand_key"),
+        timeout=_collection_timeout(state),
     )
 
+    # Only the requested rows are this run's own; an off-request row is the
+    # champion's, and it is replaced by whatever was crowned this time, so a
+    # resumed or recomputed run never delivers two of them.
     requested = set(state["countries"])
-    surfaced = list(results)
-    if champion and champion["country"] not in requested:
-        surfaced = [*results, champion]
-    return {"champion_country": champion["country"] if champion else None, "mos_results": surfaced}
+    delivered = [row for row in results if row.get("country") in requested]
+    if crowned.get("champion_row"):
+        delivered.append(crowned["champion_row"])
+    return {"champion": crowned, "mos_results": delivered}
 
 
 async def evidence_node(state: dict) -> dict:
@@ -733,6 +673,9 @@ async def evidence_node(state: dict) -> dict:
     Deterministic and free: it reads stored results and collects nothing. No
     model is involved, which is what makes the narrative checkable afterwards --
     a claim that is not in this packet is not supported by anything.
+
+    The packet comes back marked — requested, champion, display order, labels
+    in the analysis language — and is delivered as it came.
     """
     entity_key = state.get("entity_key")
     if not entity_key:
@@ -741,15 +684,13 @@ async def evidence_node(state: dict) -> dict:
     core = _client()
     await core.record_progress(state["analysis_id"], "assembling the evidence")
     packet = await core.build_evidence(
-        entity_key, state["countries"], state["period_key"], state.get("demand_ruler"), state.get("brand_key")
+        entity_key,
+        state["countries"],
+        state["period_key"],
+        state.get("demand_ruler"),
+        state.get("brand_key"),
+        language=state.get("language"),
     )
-    if packet is not None:
-        requested = set(state["countries"])
-        for entry in packet.get("countries") or []:
-            entry["requested"] = entry.get("country") in requested
-            entry["is_champion"] = entry.get("country") == state.get("champion_country")
-        packet["champion_country"] = state.get("champion_country")
-        packet["requested_countries"] = list(state["countries"])
     return {"breakdown": packet}
 
 
@@ -759,12 +700,13 @@ async def deliver_node(state: dict) -> dict:
     The scores are the answer; the narrative is a reading of them. One model
     call once took longer than the entire rest of the analysis, so the request
     completes with its numbers and the text is attached a moment later.
+
+    The rows go out as the scoring service computed them. Which ones were asked
+    for, which is the champion and how each is shown are set where the record
+    is written.
     """
     results = state.get("mos_results") or []
     requested = set(state["countries"])
-    for row in results:
-        row["requested"] = row.get("country") in requested
-        row["is_champion"] = row.get("country") == state.get("champion_country")
 
     await _client().complete_analysis(
         state["analysis_id"], result=results, breakdown=state.get("breakdown")

@@ -26,7 +26,9 @@ def core(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     client.compute_mos = AsyncMock(
         return_value=[{"country": "ESP", "mos": 70.0}, {"country": "PRT", "mos": 61.0}]
     )
-    client.score_candidates = AsyncMock(return_value=[])
+    client.crown_champion = AsyncMock(
+        return_value={"champion_country": "ESP", "champion_mos": 70.0, "requested": True, "champion_row": None}
+    )
     client.build_evidence = AsyncMock(return_value={"countries": [{"country": "ESP"}, {"country": "PRT"}]})
     client.narrate = AsyncMock(return_value="Spain leads.")
     monkeypatch.setattr(nodes, "_client", lambda: client)
@@ -44,32 +46,56 @@ async def test_a_complete_run_delivers_then_narrates(core: AsyncMock) -> None:
     assert final["narrative"] == "Spain leads."
 
 
-async def test_the_delivered_rows_say_which_markets_were_asked_for(core: AsyncMock) -> None:
-    core.compute_mos = AsyncMock(
-        return_value=[{"country": "ESP", "mos": 70.0}, {"country": "PRT", "mos": 61.0}]
-    )
-    core.score_candidates = AsyncMock(return_value=[{"country": "BRA", "mos": 88.0}])
+def _crowned_off_request(country: str = "BRA", mos: float = 88.0) -> dict:
+    return {
+        "champion_country": country,
+        "champion_mos": mos,
+        "requested": False,
+        "champion_row": {"country": country, "mos": mos, "availability_status": "available"},
+        "from_cache": True,
+        "demand_ceiling": 1_500_000.0,
+    }
+
+
+async def test_the_champion_is_crowned_by_the_scoring_service(core: AsyncMock) -> None:
+    """Deciding it here read the stored champion in one call and crowned it
+    after the ruler had moved in the next. The scoring service holds the ruler,
+    so it decides — with the requested rows and the run's period."""
+    await build_graph().ainvoke({"analysis_id": "a1"})
+
+    args = core.crown_champion.await_args.args
+    assert args[0] == "e1"
+    assert args[1] == nodes._period_key()
+    assert args[2] == ["ESP", "PRT"]
+    assert [r["country"] for r in args[3]] == ["ESP", "PRT"]
+
+
+async def test_an_off_request_champion_is_delivered_as_its_row(core: AsyncMock) -> None:
+    """The report draws the crown from the delivered rows. Naming the champion
+    without its row crowned nothing (jamón ibérico, 23/10/2026)."""
+    core.crown_champion = AsyncMock(return_value=_crowned_off_request())
 
     await build_graph().ainvoke({"analysis_id": "a1"})
 
-    delivered = core.complete_analysis.await_args.kwargs["result"]
-    by_country = {row["country"]: row for row in delivered}
-    assert by_country["ESP"]["requested"] is True
-    assert by_country["BRA"]["requested"] is False, "the champion is a benchmark, not a requested market"
-    assert by_country["BRA"]["is_champion"] is True
+    delivered = {row["country"]: row for row in core.complete_analysis.await_args.kwargs["result"]}
+    assert delivered["BRA"]["mos"] == 88.0
+    assert len(delivered) == 3, "the requested two plus the champion, once"
 
 
-async def test_a_cached_champion_skips_the_slowest_collection(core: AsyncMock) -> None:
-    """Candidate demand re-run produces the same answer, and it is most of what
-    a repeated analysis would otherwise pay for."""
-    core.candidates_coverage = AsyncMock(
-        return_value={"champion_cached": True, "champion_country": "BRA", "champion_mos": 88.0}
-    )
+async def test_the_rows_and_the_packet_go_out_as_scoring_made_them(core: AsyncMock) -> None:
+    """Which market was asked for and which is the champion are set where the
+    record is written. Marking them here as well was a second answer to the
+    same question, and the two disagreed on every rebuilt packet."""
+    core.crown_champion = AsyncMock(return_value=_crowned_off_request())
 
     await build_graph().ainvoke({"analysis_id": "a1"})
 
-    core.score_candidates.assert_not_awaited()
-    core.set_champion.assert_not_awaited()
+    for row in core.complete_analysis.await_args.kwargs["result"]:
+        assert "requested" not in row
+        assert "is_champion" not in row
+    packet = core.complete_analysis.await_args.kwargs["breakdown"]
+    assert packet == {"countries": [{"country": "ESP"}, {"country": "PRT"}]}
+    assert core.build_evidence.await_args.kwargs["language"] == "es"
 
 
 async def test_a_source_that_is_down_makes_the_run_go_back_and_collect(core: AsyncMock) -> None:
@@ -126,16 +152,6 @@ async def test_a_failed_narration_does_not_undo_a_delivered_answer(core: AsyncMo
     assert any("narration failed" in e for e in final["errors"])
 
 
-async def test_the_evidence_packet_marks_the_champion_and_the_requested(core: AsyncMock) -> None:
-    core.score_candidates = AsyncMock(return_value=[{"country": "BRA", "mos": 88.0}])
-
-    await build_graph().ainvoke({"analysis_id": "a1"})
-
-    packet = core.complete_analysis.await_args.kwargs["breakdown"]
-    assert packet["champion_country"] == "BRA"
-    assert packet["requested_countries"] == ["ESP", "PRT"]
-
-
 async def test_the_run_keeps_saying_what_it_is_doing_to_the_very_end(core: AsyncMock) -> None:
     """It used to fall silent after scoring. Everything past that — crowning the
     champion, which can collect, assembling the evidence, writing the
@@ -178,80 +194,28 @@ async def test_a_failed_narration_leaves_no_stale_line_claiming_it_is_coming(cor
     core.complete_analysis.assert_awaited_once()
 
 
-# --- The crown means "beats everything you asked about" ---
+# --- A champion crowned again is replaced, not added ---
 
 
-def _cached(country: str, mos: float) -> dict:
-    return {"champion_cached": True, "champion_country": country, "champion_mos": mos}
+async def test_a_second_crowning_replaces_the_off_request_row(core: AsyncMock) -> None:
+    """A resumed or recomputed run crowns again with the rows it already has;
+    the old champion's row must not ride along next to the new one."""
+    core.crown_champion = AsyncMock(return_value=_crowned_off_request("USA", 90.0))
+    state = {
+        "analysis_id": "a1",
+        "entity_key": "e1",
+        "countries": ["ESP", "PRT"],
+        "period_key": "2026-10",
+        "mos_results": [{"country": "ESP", "mos": 70.0}, {"country": "PRT", "mos": 61.0}, {"country": "BRA", "mos": 88.0}],
+    }
+
+    answer = await nodes.champion_node(state)
+
+    assert [r["country"] for r in answer["mos_results"]] == ["ESP", "PRT", "USA"]
 
 
-async def test_a_cached_champion_that_still_wins_keeps_the_crown(core: AsyncMock) -> None:
-    core.candidates_coverage = AsyncMock(return_value=_cached("BRA", 88.0))
-
-    await build_graph().ainvoke({"analysis_id": "a1"})
-
-    assert core.complete_analysis.await_args.kwargs["breakdown"]["champion_country"] == "BRA"
-    core.set_champion.assert_not_awaited()
-
-
-async def test_a_cached_champion_is_delivered_as_a_row_so_the_crown_shows(core: AsyncMock) -> None:
-    """The report draws the crown from the delivered rows. Naming the champion
-    without its row crowned nothing, so every analysis after the first one of
-    the month lost the crown (jamón ibérico, 23/10/2026)."""
-    core.candidates_coverage = AsyncMock(return_value=_cached("BRA", 88.0))
-
-    await build_graph().ainvoke({"analysis_id": "a1"})
-
-    delivered = {row["country"]: row for row in core.complete_analysis.await_args.kwargs["result"]}
-    assert delivered["BRA"]["is_champion"] is True
-    assert delivered["BRA"]["requested"] is False
-    assert delivered["BRA"]["mos"] == 88.0
-    assert len(delivered) == 3, "the requested two plus the champion, once"
-    core.score_candidates.assert_not_awaited()
-
-
-async def test_a_requested_market_that_beats_it_takes_the_crown(core: AsyncMock) -> None:
-    """A champion stored at 66.37 stayed crowned in a later analysis where a
-    requested market scored 69 — a visibly false claim, and the reason the
-    comparison has to be re-run rather than the stored value trusted."""
-    core.candidates_coverage = AsyncMock(return_value=_cached("BRA", 66.37))
-    core.compute_mos = AsyncMock(return_value=[{"country": "ESP", "mos": 69.03}, {"country": "PRT", "mos": 40.0}])
-
-    await build_graph().ainvoke({"analysis_id": "a1"})
-
-    assert core.complete_analysis.await_args.kwargs["breakdown"]["champion_country"] == "ESP"
-
-
-async def test_the_beaten_champion_is_replaced_not_merely_displaced(core: AsyncMock) -> None:
-    """Fixing the current report is not enough. Left stored, the beaten
-    champion is reloaded and crowned again on every later analysis — a request
-    for two other markets would crown BRA at 66.37 while ESP at 69.03 was
-    already known to be better."""
-    core.candidates_coverage = AsyncMock(return_value=_cached("BRA", 66.37))
-    core.compute_mos = AsyncMock(return_value=[{"country": "ESP", "mos": 69.03}, {"country": "PRT", "mos": 40.0}])
-
-    await build_graph().ainvoke({"analysis_id": "a1"})
-
-    core.set_champion.assert_awaited_once()
-    stored = core.set_champion.await_args
-    assert stored.kwargs["country"] == "ESP"
-    assert stored.kwargs["mos"] == 69.03
-
-
-async def test_a_tie_leaves_the_crown_with_the_requested_market(core: AsyncMock) -> None:
-    """Strictly greater, so an equal stored champion adds nothing: the caller
-    already has that market in their own list."""
-    core.candidates_coverage = AsyncMock(return_value=_cached("BRA", 70.0))
-    core.compute_mos = AsyncMock(return_value=[{"country": "ESP", "mos": 70.0}, {"country": "PRT", "mos": 40.0}])
-
-    await build_graph().ainvoke({"analysis_id": "a1"})
-
-    assert core.complete_analysis.await_args.kwargs["breakdown"]["champion_country"] == "ESP"
-    core.set_champion.assert_awaited_once()
-
-
-async def test_a_cached_champion_wins_when_nothing_requested_scored(core: AsyncMock) -> None:
-    core.candidates_coverage = AsyncMock(return_value=_cached("BRA", 66.37))
+async def test_nothing_requested_scored_is_not_delivered_as_the_champion_alone(core: AsyncMock) -> None:
+    core.crown_champion = AsyncMock(return_value=_crowned_off_request())
     core.compute_mos = AsyncMock(return_value=[{"country": "ESP", "mos": None}, {"country": "PRT", "mos": None}])
     core.ensure_coverage = AsyncMock(return_value={"tasks": [{"country": "ESP", "status": "success"}]})
 

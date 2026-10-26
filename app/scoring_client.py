@@ -290,12 +290,9 @@ class ScoringClient:
     ) -> dict[str, Any]:
         """Collect the reference markets, unless the period's champion is known.
 
-        Cached means the collection is skipped: candidate demand is the slowest
-        work in the system and re-running it produces the same answer.
-
-        The stored champion comes back with the flag, and the figure matters as
-        much as the fact: a stored champion that a requested market now beats
-        has to be replaced, not crowned again.
+        Cached means the collection was skipped: candidate demand is the slowest
+        work in the system and re-running it produces the same answer. Only the
+        flag is read here; who is champion is /champion/crown's answer.
         """
         return await self._call(
             "POST",
@@ -324,49 +321,36 @@ class ScoringClient:
         )
         return body.get("demand_ceiling"), body.get("demand_ruler")
 
-    async def score_candidates(
+    async def crown_champion(
         self,
         entity_key: str,
+        period_key: str,
         requested_countries: list[str],
-        period_key: str,
-        demand_ceiling: float | None,
+        requested_results: list[dict[str, Any]],
         brand_key: str | None = None,
-    ) -> list[dict[str, Any]]:
-        body = await self._call(
-            "POST",
-            "/internal/candidates/score",
-            json={
-                "entity_key": entity_key,
-                "requested_countries": requested_countries,
-                "period_key": period_key,
-                "demand_ceiling": demand_ceiling,
-                "brand_key": brand_key,
-            },
-        )
-        return body.get("candidates", [])
-
-    async def set_champion(
-        self,
-        entity_key: str,
-        period_key: str,
         *,
-        country: str | None,
-        mos: float | None,
-        brand_key: str | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
-        """A null country is a real outcome: "nothing was scorable this period".
-        Without recording it, the same fruitless work runs on every later
-        analysis."""
+        """The product's best market for the period, requested or not — decided
+        and stored by the scoring service, which holds the ruler it has to be
+        measured against.
+
+        Called after /mos/compute and before /evidence, which reads what this
+        stored. `champion_row` is the champion's MOS row when nobody asked for
+        it, ready to be delivered next to the requested ones. It may collect
+        macro data for a few candidates, so it gets the collecting timeout.
+        """
         return await self._call(
             "POST",
-            "/internal/champion",
+            "/internal/champion/crown",
             json={
                 "entity_key": entity_key,
                 "period_key": period_key,
-                "country": country,
-                "mos": mos,
+                "requested_countries": requested_countries,
+                "requested_results": requested_results,
                 "brand_key": brand_key,
             },
+            timeout=_collection_timeout(timeout),
         )
 
     async def compute_indicators(
@@ -415,7 +399,11 @@ class ScoringClient:
         period_key: str,
         demand_ruler: dict[str, Any] | None = None,
         brand_key: str | None = None,
+        language: str | None = None,
     ) -> dict[str, Any] | None:
+        """The packet comes back whole: which countries were requested, which
+        is the crowned champion, the display order and every label in
+        `language`. Nothing is added to it here."""
         body = await self._call(
             "POST",
             "/internal/evidence",
@@ -425,6 +413,7 @@ class ScoringClient:
                 "period_key": period_key,
                 "demand_ruler": demand_ruler,
                 "brand_key": brand_key,
+                "language": language,
             },
         )
         return body.get("packet")
