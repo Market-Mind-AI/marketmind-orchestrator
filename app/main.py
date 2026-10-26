@@ -8,12 +8,11 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from app import spend
 from app.checkpointer import open_checkpointer
 from app.config import get_settings
 from app.graph import build_graph, set_graph
-from app.observability import callbacks, tracing_enabled
-from app.public import router as public_router, watch_for_orphans
+from app.observability import tracing_enabled
+from app.public import _start as start_run, router as public_router, watch_for_orphans
 
 from app.logging_setup import setup_logging
 
@@ -64,7 +63,7 @@ def require_internal_token(x_internal_token: str | None = Header(default=None)) 
 
     The same secret this service sends the scoring service on every /internal
     call, required back on the one call that goes the other way: the scoring
-    service's resume path starts runs here, and a run costs money. Until now
+    service can start runs here, and a run costs money. Until now
     anyone who could reach this port could start one.
 
     With no secret configured every call is refused rather than allowed — the
@@ -83,6 +82,13 @@ def require_internal_token(x_internal_token: str | None = Header(default=None)) 
 
 @app.post("/run-analysis", dependencies=[Depends(require_internal_token)])
 async def run_analysis(request: Request):
+    """Run (or resume) an analysis by id, streaming its graph events.
+
+    Through the same door as every other start — claim, lease, cost report —
+    so a caller that re-invokes an analysis another runner is working on gets
+    told so instead of a second execution. The run is a task of its own: a
+    caller that hangs up stops hearing the events, not the analysis.
+    """
     payload = await request.json()
 
     # The thread id IS the analysis id, and that is what makes re-invoking mean
@@ -92,22 +98,15 @@ async def run_analysis(request: Request):
     if not analysis_id:
         raise HTTPException(status_code=422, detail="analysis_id is required: it is the run's identity.")
 
-    config = {"configurable": {"thread_id": str(analysis_id)}, "callbacks": callbacks()}
+    events: asyncio.Queue[dict | None] = asyncio.Queue()
+    start_run(str(analysis_id), events.put_nowait)
 
     async def event_generator():
         # A run that dies mid-stream used to close the connection with no final
         # event, which reads to the caller exactly like a run that finished
-        # quietly. The caller then has to guess, and the guess that costs money
-        # is "it worked". So a failure says so, on the stream, before closing.
-        #
-        # The tally is opened around the whole stream so every node's tool calls
-        # add to the same one; the nodes read it when they report the run.
-        try:
-            with spend.tally():
-                async for event in request.app.state.graph.astream(payload, config=config):
-                    yield f"data: {json.dumps(event)}\n\n"
-        except Exception as exc:  # noqa: BLE001 — the stream is the only channel back
-            logger.exception("Analysis %s failed", analysis_id)
-            yield f"data: {json.dumps({'error': str(exc), 'type': type(exc).__name__})}\n\n"
+        # quietly. The run says so on the stream — an `error`, or `skipped`
+        # when another runner holds it — before the stream closes.
+        while (event := await events.get()) is not None:
+            yield f"data: {json.dumps(event, default=str)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

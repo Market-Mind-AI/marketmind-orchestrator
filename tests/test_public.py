@@ -146,19 +146,52 @@ def test_countries_and_identify_are_passed_through(scoring: AsyncMock) -> None:
     scoring.identify_image.assert_awaited_once()
 
 
-def test_a_run_whose_graph_blew_up_is_recorded_as_failed(scoring: AsyncMock) -> None:
+def _graph(*, events=(), error: Exception | None = None, delivered: bool = False):
+    """A compiled graph's surface as _run uses it: astream, then the checkpoint."""
+    from types import SimpleNamespace
+
+    graph = AsyncMock()
+
+    async def astream(_payload, config=None):
+        for event in events:
+            yield event
+        if error is not None:
+            raise error
+
+    graph.astream = astream
+    graph.aget_state = AsyncMock(return_value=SimpleNamespace(values={"delivered": delivered}))
+    return graph
+
+
+async def test_a_run_whose_graph_blew_up_is_recorded_as_failed(scoring: AsyncMock) -> None:
     """There is no caller left to raise to, so an unhandled error has to land on
     the record — otherwise the analysis stays `running` forever and the buyer
     waits for something that already stopped."""
-    graph = AsyncMock()
-    graph.ainvoke = AsyncMock(side_effect=RuntimeError("boom"))
-
-    with patch("app.graph.get_graph", return_value=graph):
-        import asyncio
-
-        asyncio.get_event_loop_policy().new_event_loop().run_until_complete(public._run("r1"))
+    with patch("app.graph.get_graph", return_value=_graph(error=RuntimeError("boom"))):
+        await public._run("r1")
 
     scoring.fail_analysis.assert_awaited_once()
+
+
+async def test_a_delivered_analysis_is_never_failed_afterwards(scoring: AsyncMock) -> None:
+    """The buyer has the answer and was billed for it. An error after delivery —
+    the narrative, a measurement — broke a reading of it, not the answer."""
+    graph = _graph(events=[{"deliver": {"delivered": True}}], error=RuntimeError("boom"), delivered=True)
+
+    with patch("app.graph.get_graph", return_value=graph):
+        await public._run("r1")
+
+    scoring.fail_analysis.assert_not_awaited()
+
+
+async def test_a_failing_cost_report_does_not_fail_the_analysis(scoring: AsyncMock) -> None:
+    with (
+        patch("app.graph.get_graph", return_value=_graph(events=[{"deliver": {"delivered": True}}])),
+        patch("app.metrics.analysis_cost", side_effect=RuntimeError("pricing table")),
+    ):
+        await public._run("r1")
+
+    scoring.fail_analysis.assert_not_awaited()
 
 
 async def test_a_run_in_flight_is_held_onto(scoring: AsyncMock) -> None:
@@ -223,13 +256,67 @@ async def test_a_scoring_service_that_is_not_up_yet_resumes_nothing_and_does_not
     assert await public.resume_orphans() == 0
 
 
-async def test_a_new_analysis_is_claimed_before_it_runs(scoring: AsyncMock, started: list[str]) -> None:
+async def test_a_run_is_claimed_before_it_runs(scoring: AsyncMock) -> None:
     """Otherwise a pod restarting elsewhere sees it unclaimed and takes it over
-    while this process is working on it."""
-    _client().post("/analyze", json={"product_name": "air fryer", "countries": ["ESP"]})
+    while this process is working on it. Every start goes through here —
+    /analyze, the orphan watch and /run-analysis alike."""
+    graph = _graph()
 
-    scoring.claim_analysis.assert_awaited_once()
-    assert scoring.claim_analysis.await_args.kwargs["runner"] == public.runner_id()
+    with patch("app.graph.get_graph", return_value=graph):
+        await public._run("r1")
+
+    scoring.claim_analysis.assert_awaited()
+    assert scoring.claim_analysis.await_args_list[0].kwargs["runner"] == public.runner_id()
+
+
+async def test_a_run_held_by_another_runner_does_not_execute(scoring: AsyncMock) -> None:
+    """The resume path that bypassed the claim could run one analysis twice."""
+    scoring.claim_analysis = AsyncMock(return_value=False)
+    heard: list = []
+
+    with patch("app.graph.get_graph", side_effect=AssertionError("the graph must not run")):
+        await public._run("r1", heard.append)
+
+    assert heard == [{"skipped": "another runner holds this analysis"}, None]
+    scoring.fail_analysis.assert_not_awaited()
+
+
+async def test_a_claim_that_cannot_be_asked_about_does_not_run(scoring: AsyncMock) -> None:
+    """Running without knowing is how one analysis ends up running twice. The
+    next orphan pass asks again."""
+    scoring.claim_analysis = AsyncMock(side_effect=ScoringUnavailable("down"))
+    heard: list = []
+
+    with patch("app.graph.get_graph", side_effect=AssertionError("the graph must not run")):
+        await public._run("r1", heard.append)
+
+    assert "error" in heard[0]
+    assert heard[-1] is None
+
+
+async def test_the_same_analysis_never_runs_twice_in_one_process(scoring: AsyncMock) -> None:
+    """A runner re-claiming its own analysis is granted — that is how it renews
+    — so the claim alone cannot stop a second start inside this process."""
+    import asyncio
+
+    release = asyncio.Event()
+
+    async def astream(_payload, config=None):
+        await release.wait()
+        yield {"score": {}}
+
+    graph = _graph()
+    graph.astream = astream
+    heard: list = []
+
+    with patch("app.graph.get_graph", return_value=graph):
+        first = asyncio.create_task(public._run("r1"))
+        await asyncio.sleep(0.01)
+        await public._run("r1", heard.append)
+        release.set()
+        await first
+
+    assert heard == [{"skipped": "this analysis is already running in this process"}, None]
 
 
 def test_the_runner_names_itself_after_the_pod(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -250,14 +337,15 @@ async def test_the_claim_is_renewed_on_a_clock_while_the_run_lasts(scoring: Asyn
     analysis is orphaned while it is very much alive."""
     import asyncio
 
-    graph = AsyncMock()
+    graph = _graph()
     running = asyncio.Event()
 
     async def slow_run(_payload, config=None):
         running.set()
         await asyncio.sleep(3600)
+        yield {}
 
-    graph.ainvoke = slow_run
+    graph.astream = slow_run
 
     with (
         patch("app.graph.get_graph", return_value=graph),
@@ -276,8 +364,7 @@ async def test_the_claim_is_released_when_the_run_ends(scoring: AsyncMock) -> No
     would keep an orphan invisible."""
     import asyncio
 
-    graph = AsyncMock()
-    graph.ainvoke = AsyncMock(return_value={})
+    graph = _graph()
 
     with (
         patch("app.graph.get_graph", return_value=graph),

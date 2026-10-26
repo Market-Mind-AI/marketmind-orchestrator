@@ -660,15 +660,17 @@ async def deliver_node(state: dict) -> dict:
     # recent demand instead of collected -- the measure that shows the skip
     # changing behaviour, not just existing.
     observability.record("absent_markets_skipped", float(len(state.get("absent_countries") or {})))
-    return {}
+    return {"delivered": True}
 
 
 async def narrate_node(state: dict) -> dict:
     """Turn the packet into prose, and never let that undo a delivered answer.
 
-    Everything here is swallowed, not just the model call. An earlier version
-    guarded only the generation, and a failure in the write marked an
-    already-successful analysis as failed.
+    Everything here is swallowed, not just the model call — any exception, not
+    only the scoring service's. An earlier version guarded only the
+    generation, and a failure in the write marked an already-successful
+    analysis as failed; a later one guarded only the scoring errors, and
+    anything else escaped to the run's own handler, which failed the record.
     """
     packet = state.get("breakdown")
     if not packet:
@@ -692,7 +694,7 @@ async def narrate_node(state: dict) -> dict:
         await core.record_progress(state["analysis_id"], None)
         await _check_narrative(narrative, packet, language=state.get("language"))
         return {"narrative": narrative}
-    except (ScoringUnavailable, ScoringRejected) as exc:
+    except Exception as exc:  # noqa: BLE001 — the answer is already delivered
         logger.exception("Analysis %s is delivered, but attaching its narrative failed", state["analysis_id"])
         observability.flag("WARNING", f"delivered without a narrative: {exc}")
         return {"errors": [f"narration failed: {exc}"]}

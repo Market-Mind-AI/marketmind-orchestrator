@@ -68,6 +68,11 @@ class OrchestratorState(TypedDict, total=False):
     demand_ceiling: float | None
     demand_ruler: dict[str, Any] | None
 
+    # The answer went out. Read when something fails later in the run, or in a
+    # run that resumed this one: a delivered analysis is never failed after
+    # the fact, because the buyer already has it and was billed for it.
+    delivered: bool
+
     mos_results: list[dict[str, Any]]
     breakdown: dict[str, Any] | None
     narrative: str | None

@@ -22,6 +22,7 @@ import logging
 import os
 import socket
 import uuid
+from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
 
@@ -78,9 +79,10 @@ async def analyze(payload: dict[str, Any]) -> dict[str, Any]:
     a request held open for it is a request a proxy will cut.
 
     The run is started as a task rather than awaited. If this pod dies mid-run
-    the task dies with it — and that is survivable, because the scoring service
-    sweeps analyses that stopped reporting and re-invokes them by the same id,
-    which is a resume rather than a second run.
+    the task dies with it — and that is survivable, because the orphan watch
+    (here, in every replica) picks up an analysis whose claim stopped being
+    renewed and re-invokes it by the same id, which is a resume rather than a
+    second run.
     """
     product_name = (payload.get("product_name") or "").strip()
     if not product_name:
@@ -122,12 +124,8 @@ async def analyze(payload: dict[str, Any]) -> dict[str, Any]:
         raise _as_http_error(exc) from exc
 
     request_id = str(registered["request_id"])
-    # Claimed before it starts, so a restart elsewhere does not pick it up while
-    # this process is working on it.
-    try:
-        await core.claim_analysis(request_id, runner=runner_id())
-    except (ScoringUnavailable, ScoringRejected) as exc:
-        logger.warning("Analysis %s could not be claimed; running it anyway: %s", request_id, exc)
+    # Claimed inside the run, before anything else — the same door every other
+    # way of starting one goes through.
     _start(request_id)
     return {"request_id": request_id, "status": registered["status"]}
 
@@ -143,12 +141,22 @@ def _language(value: Any) -> str | None:
 # Strong references to the runs in flight. asyncio keeps only a WEAK reference to
 # a task, so a task nobody holds can be collected mid-run and cancelled — the
 # analysis would simply stop, with the record left saying `running` until the
-# sweep picked it up. Rare, silent, and impossible to reproduce on demand.
+# orphan watch picked it up. Rare, silent, and impossible to reproduce on demand.
 _in_flight: set[asyncio.Task[None]] = set()
 
+# The analyses this process is running right now. The claim cannot tell two
+# runs of the same analysis apart when both are in this process — a runner
+# re-claiming its own analysis is granted, which is what lets it renew — so the
+# process keeps its own list as well.
+_running: set[str] = set()
 
-def _start(analysis_id: str) -> None:
-    task = asyncio.create_task(_run(analysis_id))
+# What a run reports to whoever is watching it: graph events as they happen,
+# then None once it is over, whatever the outcome.
+Listener = Callable[[dict[str, Any] | None], None]
+
+
+def _start(analysis_id: str, listener: Listener | None = None) -> None:
+    task = asyncio.create_task(_run(analysis_id, listener) if listener else _run(analysis_id))
     _in_flight.add(task)
     task.add_done_callback(_in_flight.discard)
 
@@ -197,8 +205,13 @@ async def resume_orphans() -> int:
     another agent is actively running is not orphaned, and the claim it holds is
     renewed on a clock for as long as the run lasts.
 
+    This is the one resumer. The scoring service used to sweep stalled
+    analyses too and re-invoke them through /run-analysis without claiming,
+    which could run one analysis twice; /run-analysis now claims like this
+    does, and the sweep is for the scoring service to retire.
+
     Never raises. A scoring service that is not up yet resumes nothing, and the
-    sweep remains what it always was — the net under this.
+    next pass asks again.
     """
     try:
         orphans = await _client().orphaned_analyses()
@@ -208,11 +221,13 @@ async def resume_orphans() -> int:
 
     resumed = 0
     for analysis_id in orphans:
+        if analysis_id in _running:
+            continue  # this process has it; its claim is about to be renewed
         try:
             if not await _client().claim_analysis(analysis_id, runner=runner_id()):
                 continue  # someone live has it
         except (ScoringUnavailable, ScoringRejected) as exc:
-            logger.warning("Could not claim analysis %s, leaving it to the sweep: %s", analysis_id, exc)
+            logger.warning("Could not claim analysis %s, trying again next pass: %s", analysis_id, exc)
             continue
         logger.info("Resuming analysis %s, orphaned by a restart", analysis_id)
         _start(analysis_id)
@@ -242,22 +257,59 @@ async def _hold_claim(analysis_id: str) -> None:
             logger.warning("Could not renew the claim on analysis %s", analysis_id, exc_info=True)
 
 
-async def _run(analysis_id: str) -> None:
-    """Drive the graph for one analysis, outside the request that asked for it.
+async def _run(analysis_id: str, listener: Listener | None = None) -> None:
+    """Drive the graph for one analysis, outside any request — the one way a
+    run starts, whoever asked for it: POST /analyze, the orphan watch, or the
+    scoring service's /run-analysis.
+
+    Claimed first, so the same analysis can never execute twice: another live
+    runner's claim means this one does not run, and neither does a second
+    start inside this process. A claim that cannot even be asked about does
+    not run either — the next orphan pass asks again — because running without
+    knowing is how one analysis ends up running twice.
 
     Every failure the graph can report, it reports on the analysis record
     itself. What is caught here is only the kind that leaves nothing written —
     and that is logged rather than raised, because there is no longer a caller
-    to raise to.
+    to raise to. An analysis already delivered is never turned into a failed
+    one from here: what broke after delivery broke a reading of the answer,
+    not the answer.
     """
+    tell: Listener = listener or (lambda _event: None)
+    try:
+        if analysis_id in _running:
+            tell({"skipped": "this analysis is already running in this process"})
+            return
+        try:
+            granted = await _client().claim_analysis(analysis_id, runner=runner_id())
+        except (ScoringUnavailable, ScoringRejected) as exc:
+            logger.warning("Analysis %s could not be claimed, so it was not run: %s", analysis_id, exc)
+            tell({"error": f"the analysis could not be claimed: {exc}", "type": type(exc).__name__})
+            return
+        if not granted:
+            logger.info("Analysis %s is held by another runner; not running it here", analysis_id)
+            tell({"skipped": "another runner holds this analysis"})
+            return
+
+        _running.add(analysis_id)
+        try:
+            await _drive(analysis_id, tell)
+        finally:
+            _running.discard(analysis_id)
+    finally:
+        tell(None)
+
+
+async def _drive(analysis_id: str, tell: Listener) -> None:
     from app.graph import get_graph
-    from app.observability import callbacks, run_span
+    from app.observability import callbacks, flag, run_span
     from app import metrics, spend
 
     try:
         graph = get_graph()
     except RuntimeError:
         logger.exception("Analysis %s could not start: the graph is not built", analysis_id)
+        tell({"error": "the graph is not built", "type": "RuntimeError"})
         return
 
     config = {"configurable": {"thread_id": analysis_id}, "callbacks": callbacks()}
@@ -267,25 +319,51 @@ async def _run(analysis_id: str) -> None:
         # ele os scores eram descartados em silêncio e os fatos viravam traces
         # soltos. Ver observability.run_span.
         with spend.tally(), run_span(f"analysis {analysis_id}", seed=analysis_id):
-            await graph.ainvoke({"analysis_id": analysis_id}, config=config)
+            try:
+                async for event in graph.astream({"analysis_id": analysis_id}, config=config):
+                    tell(event)
+            except Exception as exc:  # noqa: BLE001 — nothing left to raise to; the record carries the outcome
+                logger.exception("Analysis %s ended in an unhandled error", analysis_id)
+                tell({"error": str(exc), "type": type(exc).__name__})
+                if await _delivered(graph, config):
+                    # The buyer has the answer and was billed for it. Whatever
+                    # failed afterwards — the narrative, a measurement — is a
+                    # degraded reading, said on the trace, never a failure on
+                    # the record. The scoring service refuses that too.
+                    flag("WARNING", f"delivered, but a step after delivery failed: {exc}")
+                else:
+                    try:
+                        await _client().fail_analysis(analysis_id, "The analysis ended unexpectedly.")
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Analysis %s could not even be marked failed", analysis_id)
             # Depois do grafo INTEIRO, e não na entrega. A narrativa vem depois
             # do deliver e é a maior chamada de modelo da execução; medindo no
-            # deliver, o total saía sem ela, sem o juiz e sem a revisão. Aqui
-            # dentro de propósito: o span e a contagem ainda estão abertos.
-            metrics.token_consumption()
-            metrics.demand_cost()
-            metrics.analysis_cost(analysis_id)
-    except Exception:  # noqa: BLE001 — nothing left to raise to; the record carries the outcome
-        logger.exception("Analysis %s ended in an unhandled error", analysis_id)
-        try:
-            await _client().fail_analysis(analysis_id, "The analysis ended unexpectedly.")
-        except Exception:  # noqa: BLE001
-            logger.exception("Analysis %s could not even be marked failed", analysis_id)
+            # deliver, o total saía sem ela. Aqui dentro de propósito: o span e
+            # a contagem ainda estão abertos. Uma medição que falha não toca no
+            # registro da análise.
+            try:
+                metrics.token_consumption()
+                metrics.demand_cost()
+                metrics.analysis_cost(analysis_id)
+            except Exception:  # noqa: BLE001 — a measurement must never break what it measures
+                logger.exception("Could not report what analysis %s cost", analysis_id)
     finally:
         # Released as soon as the run ends, however it ends. A lease still being
         # renewed after the work stopped is the one thing that would keep an
         # orphan invisible.
         lease.cancel()
+
+
+async def _delivered(graph: Any, config: dict[str, Any]) -> bool:
+    """Whether the checkpoint says the answer already went out — in this run or
+    in the one this resumed. Unknown counts as not delivered: the scoring
+    service still refuses to fail an analysis that is done."""
+    try:
+        snapshot = await graph.aget_state(config)
+        return bool((snapshot.values or {}).get("delivered"))
+    except Exception:  # noqa: BLE001 — a checkpoint that cannot be read is not a delivery
+        logger.debug("Could not read the checkpoint to see whether it was delivered", exc_info=True)
+        return False
 
 
 @router.get("/analyze/{request_id}", summary="Read an analysis")

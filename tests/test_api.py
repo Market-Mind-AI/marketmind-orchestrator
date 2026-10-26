@@ -93,3 +93,21 @@ def test_run_analysis_streams_the_failure_instead_of_closing_quietly(client: Tes
     ]
     assert any("error" in e for e in events), "a failed run must say so on the stream"
     assert not any("mos_score" in json.dumps(e) for e in events), "no score may reach the caller"
+
+
+def test_run_analysis_goes_through_the_claim(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scoring service's resume path called this without claiming, so an
+    analysis another runner was working on could execute twice."""
+    from unittest.mock import AsyncMock
+
+    from app import public
+
+    scoring = AsyncMock()
+    scoring.claim_analysis = AsyncMock(return_value=False)
+    monkeypatch.setattr(public, "_client", lambda: scoring)
+
+    response = client.post("/run-analysis", json={"analysis_id": "123"}, headers=_HEADERS)
+
+    events = [json.loads(line[len("data: "):]) for line in response.text.splitlines() if line.startswith("data: ")]
+    assert events == [{"skipped": "another runner holds this analysis"}]
+    scoring.claim_analysis.assert_awaited_once()

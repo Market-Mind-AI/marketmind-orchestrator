@@ -185,6 +185,17 @@ async def test_it_says_the_explanation_is_coming_before_writing_it(core: AsyncMo
     assert core.narrate.await_args.kwargs["language"] == "es"
 
 
+async def test_any_failure_while_narrating_leaves_the_answer_delivered(core: AsyncMock) -> None:
+    """Not only the scoring service's errors: anything else escaped to the
+    run's own handler, which failed a record that was already done."""
+    core.attach_narrative = AsyncMock(side_effect=KeyError("narrative"))
+
+    final = await build_graph().ainvoke({"analysis_id": "a1"})
+
+    core.fail_analysis.assert_not_awaited()
+    assert final["delivered"] is True
+
+
 async def test_a_failed_narration_leaves_no_stale_line_claiming_it_is_coming(core: AsyncMock) -> None:
     from app.scoring_client import ScoringUnavailable
 
