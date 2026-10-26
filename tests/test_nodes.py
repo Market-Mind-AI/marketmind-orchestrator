@@ -4,7 +4,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app import nodes
+from app import agent, nodes
+from app.agent import Action, Situation
 
 _REQUESTED = ["ESP", "PRT", "BRA"]
 
@@ -60,7 +61,11 @@ def test_a_source_that_is_down_is_worth_insisting_on() -> None:
         coverage_tasks=[{"country": "BRA", "status": "failed", "error_message": "502"}],
     )
 
-    assert nodes.after_scoring(state) == "insist"
+    assert nodes.after_scoring(state) == "decide"
+    allowed = nodes.allowed_actions(Situation.SOURCE_DOWN, state)
+    assert Action.RETRY_LATER in allowed
+    # Without a model, the rule the graph always applied: insist.
+    assert agent.fallback(Situation.SOURCE_DOWN, allowed) is Action.RETRY_LATER
 
 
 def test_a_source_that_simply_lacks_the_datum_is_not() -> None:
@@ -81,7 +86,9 @@ def test_insisting_stops_at_the_attempt_limit() -> None:
         coverage_tasks=[{"country": "BRA", "status": "failed"}],
     )
 
-    assert nodes.after_scoring(state) == "give_up"
+    allowed = nodes.allowed_actions(Situation.COLLECTION_FAILED, state)
+    assert Action.RETRY_LATER not in allowed
+    assert agent.fallback(Situation.COLLECTION_FAILED, allowed) is Action.GIVE_UP
 
 
 def test_insisting_stops_at_the_deadline() -> None:
@@ -93,7 +100,10 @@ def test_insisting_stops_at_the_deadline() -> None:
         coverage_tasks=[{"country": "BRA", "status": "failed"}],
     )
 
-    assert nodes.after_scoring(state) == "give_up"
+    allowed = nodes.allowed_actions(Situation.SOURCE_DOWN, state)
+    assert Action.RETRY_LATER not in allowed
+    assert Action.WAIT_AND_RESUME not in allowed, "no waiting past the deadline"
+    assert agent.fallback(Situation.SOURCE_DOWN, allowed) is Action.GIVE_UP
 
 
 def test_a_complete_run_never_gives_up_even_past_the_deadline() -> None:

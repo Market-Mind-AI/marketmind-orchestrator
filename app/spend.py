@@ -113,6 +113,19 @@ def add_response(headers: Mapping[str, str]) -> None:
         spend.dataforseo_calls_without_cost += _as_int(headers.get("X-DataForSEO-Calls-Without-Cost"))
 
 
+def add_model_call(input_tokens: int, output_tokens: int) -> None:
+    """A model call this service made itself — the agent's decisions, the only
+    one. Counted next to the scoring service's, so token_consumption is the
+    run's whole spend. Not priced here: the trace's generation carries the
+    usage, and Langfuse prices it."""
+    spend = _current.get()
+    if spend is None:
+        return
+    spend.input_tokens += int(input_tokens or 0)
+    spend.output_tokens += int(output_tokens or 0)
+    spend.calls += 1
+
+
 def _as_int(value: str | None) -> int:
     try:
         return int(value) if value is not None else 0

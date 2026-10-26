@@ -111,6 +111,28 @@ def run_span(name: str, *, seed: str | None = None) -> Iterator[None]:
         yield
 
 
+@contextmanager
+def generation(name: str, *, model: str, input: Any) -> Iterator[Any | None]:  # noqa: A002 — Langfuse's name
+    """One model call this service makes itself, as a generation in the run's
+    trace — model, input, and (set by the caller) output and usage. Yields
+    None when tracing is not configured or the observation cannot open; the
+    call goes ahead either way."""
+    with ExitStack() as stack:
+        observation = None
+        if _handler() is not None:
+            try:
+                from langfuse import get_client
+
+                observation = stack.enter_context(
+                    get_client().start_as_current_observation(
+                        as_type="generation", name=name, model=model, input=input
+                    )
+                )
+            except Exception:  # noqa: BLE001 — an observation that cannot open must not stop the call
+                logger.debug("Could not open the generation %s", name, exc_info=True)
+        yield observation
+
+
 def flag(level: str, message: str) -> None:
     """Mark the run's trace as degraded (WARNING) or failed (ERROR), and say why.
 

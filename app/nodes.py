@@ -1,21 +1,22 @@
 """The steps of an analysis, in the order the scoring service's own loop ran them.
 
-This is a faithful reimplementation, not an improvement. Each node calls a tool
-and records what it learned; none of them computes anything. The MOS, the
-indicators and the evidence stay where the method is versioned, and the only
-model call is the narration, which explains an answer that is already decided.
-
-Doing it faithfully first is what makes the change checkable: the same product,
-the same countries and the same period have to produce the same MOS as the loop
-this replaces. An improvement smuggled in here would make that comparison
-meaningless, and there would be no second chance to make it.
+Each node calls a tool and records what it learned; none of them computes
+anything. The MOS, the indicators, the champion and the evidence stay where the
+method is versioned. Two model calls touch a run: the narration, in the scoring
+service, which explains an answer that is already decided; and the agent's
+decisions (app/agent.py), here, which choose what the run does next when a
+step fails or a result does not hold together — from a closed set of actions,
+each carried out by these same nodes.
 """
 
+import asyncio
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from app import metrics, observability, quality
+from app import agent, metrics, observability, quality
+from app.agent import Action, Situation
 from app.config import get_settings
 from app.scoring_client import ScoringClient, ScoringRejected, ScoringUnavailable
 
@@ -426,6 +427,13 @@ async def ruler_node(state: dict) -> dict:
 
     core = _client()
     await core.record_progress(state["analysis_id"], "settling the demand ruler")
+    try:
+        return await _settle_ruler(core, state, entity_key)
+    except ScoringUnavailable as exc:
+        return _unavailable("settling the demand ruler", exc)
+
+
+async def _settle_ruler(core: ScoringClient, state: dict, entity_key: str) -> dict:
     known = await core.candidates_coverage(
         entity_key,
         state["countries"],
@@ -457,7 +465,19 @@ async def ruler_node(state: dict) -> dict:
     ceiling, ruler = await core.demand_ceiling(
         entity_key, state["countries"], state["period_key"], state.get("brand_key")
     )
-    return {"demand_ceiling": ceiling, "demand_ruler": ruler}
+    return {"demand_ceiling": ceiling, "demand_ruler": ruler, "unavailable": None}
+
+
+def _unavailable(step: str, exc: ScoringUnavailable) -> dict:
+    """A step the scoring service could not finish — down, or past the
+    timeout. Recorded instead of raised: it is the same kind of failure as a
+    source that is down during collection, and it goes to the same decision
+    instead of failing the whole run on the spot. The scoring service already
+    retried the collection inside the call, so nothing is retried here."""
+    message = f"{step}: {exc}"
+    logger.warning("Step could not finish: %s", message)
+    observability.flag("WARNING", f"{step} could not finish: {exc}")
+    return {"unavailable": message}
 
 
 async def measure_node(state: dict) -> dict:
@@ -469,17 +489,20 @@ async def measure_node(state: dict) -> dict:
     """
     core = _client()
     analysis_id = state["analysis_id"]
-    for country in state["countries"]:
-        await core.record_progress(analysis_id, f"measuring {country}")
-        await core.compute_indicators(
-            state.get("entity_key"),
-            country,
-            state["period_key"],
-            state.get("demand_ceiling"),
-            state.get("brand_key"),
-        )
-    await core.calibrate_weights(state["period_key"])
-    return {}
+    try:
+        for country in state["countries"]:
+            await core.record_progress(analysis_id, f"measuring {country}")
+            await core.compute_indicators(
+                state.get("entity_key"),
+                country,
+                state["period_key"],
+                state.get("demand_ceiling"),
+                state.get("brand_key"),
+            )
+        await core.calibrate_weights(state["period_key"])
+    except ScoringUnavailable as exc:
+        return _unavailable("measuring the markets", exc)
+    return {"unavailable": None}
 
 
 async def score_node(state: dict) -> dict:
@@ -490,10 +513,13 @@ async def score_node(state: dict) -> dict:
 
     core = _client()
     await core.record_progress(state["analysis_id"], "scoring the markets")
-    results = await core.compute_mos(
-        entity_key, state["countries"], state["period_key"], state.get("brand_key")
-    )
-    return {"mos_results": results, "attempts": state.get("attempts", 0) + 1}
+    try:
+        results = await core.compute_mos(
+            entity_key, state["countries"], state["period_key"], state.get("brand_key")
+        )
+    except ScoringUnavailable as exc:
+        return {**_unavailable("scoring the markets", exc), "attempts": state.get("attempts", 0) + 1}
+    return {"mos_results": results, "attempts": state.get("attempts", 0) + 1, "unavailable": None}
 
 
 def incomplete_countries(state: dict) -> list[str]:
@@ -534,30 +560,280 @@ def _past_deadline(state: dict) -> bool:
     return datetime.now(UTC) >= datetime.fromisoformat(deadline)
 
 
+def after_step(next_step: str):  # noqa: ANN201
+    """The edge after ruler and measure: on to the next step, or to the
+    decision when the scoring service could not finish this one."""
+
+    def route(state: dict) -> str:
+        return "decide" if state.get("unavailable") else next_step
+
+    return route
+
+
 def after_scoring(state: dict) -> str:
-    """Insist, give up, or carry on -- the decision the analysis turns on.
+    """Carry on, decide, or give up -- the branch the analysis turns on.
 
-    Nothing partial goes out. A country missing from a ranking is not a smaller
-    answer, it is a different one, and the buyer paid for the one they asked
-    for. So an incomplete run goes back to collect, for as long as the cause is
-    a source that is down.
+    A run that scored every requested market carries on. One whose missing
+    markets are waiting on a source that failed or is down goes to the
+    decision: insisting, waiting, or delivering what is scored with a note are
+    all defensible, and which one is right depends on more than an `if`
+    weighs well.
 
-    It stops going back when the cause is permanent -- the source does not have
-    the datum, and the country is declared rather than waited on -- when the
-    attempts run out, or when the deadline passes. Those end the run with a
-    reason instead of delivering half a comparison.
+    A market the sources simply do not hold is not a decision. Asking again
+    produces the same nothing, so the run ends with a reason.
     """
+    if state.get("unavailable"):
+        return "decide"
     missing = incomplete_countries(state)
     if not missing:
         return "complete"
-    if _past_deadline(state):
-        return "give_up"
-    if state.get("attempts", 0) >= MAX_ATTEMPTS:
-        return "give_up"
-    if not _has_transient_failure(state, missing):
-        # Permanent. Asking again produces the same nothing.
-        return "give_up"
-    return "insist"
+    if _has_transient_failure(state, missing):
+        return "decide"
+    return "give_up"
+
+
+# --- the decision point -----------------------------------------------------
+
+# What a failure's text says when the cause is a source (or the scoring service)
+# being down rather than a collection that ran and failed. Read off the message
+# the scoring service relays; a guess, but only about which question to ask —
+# the answer is still chosen from the allowed actions.
+_DOWN = re.compile(r"\b(50[234])\b|unavailable|timed? ?out|timeout|connect", re.I)
+
+
+def _source_down(state: dict, missing: list[str]) -> bool:
+    if state.get("unavailable"):
+        return True
+    wanted = set(missing)
+    for task in state.get("coverage_tasks") or []:
+        if task.get("status") != "failed":
+            continue
+        if task.get("country") is not None and task.get("country") not in wanted:
+            continue
+        # No source: the scoring service itself did not answer the collection.
+        if not task.get("source") or _DOWN.search(str(task.get("error_message") or "")):
+            return True
+    return False
+
+
+def _rounds(state: dict) -> int:
+    return max(int(state.get("attempts", 0) or 0), int(state.get("retries", 0) or 0))
+
+
+def allowed_actions(situation: Situation, state: dict) -> list[Action]:
+    """The fence. Computed from the state, never asked of the model: nothing
+    past the deadline, no delivering with nothing requested scored, a single
+    recompute."""
+    in_time = not _past_deadline(state)
+    something_scored = len(incomplete_countries(state)) < len(state.get("countries") or [])
+    if situation is Situation.INCOHERENT:
+        actions = [] if state.get("recomputed") else [Action.RECOMPUTE_ONCE]
+        return [*actions, Action.DELIVER, Action.DELIVER_WITH_NOTE]
+
+    actions: list[Action] = []
+    if in_time and _rounds(state) < MAX_ATTEMPTS:
+        actions.append(Action.RETRY_LATER)
+    if situation is Situation.SOURCE_DOWN and in_time:
+        actions.append(Action.WAIT_AND_RESUME)
+    # Delivering needs this round to have scored. A step that failed before
+    # scoring leaves rows from an earlier round, measured against what may no
+    # longer be the ruler.
+    if something_scored and not state.get("unavailable"):
+        if situation is Situation.COLLECTION_FAILED:
+            actions.append(Action.CONTINUE_WITHOUT)
+        actions.append(Action.DELIVER_WITH_NOTE)
+    actions.append(Action.GIVE_UP)
+    return actions
+
+
+def _decision_facts(situation: Situation, state: dict) -> dict[str, Any]:
+    """What the model is told. Names and causes, not scores: it chooses what
+    happens next and has no use for a figure it could repeat."""
+    missing = incomplete_countries(state)
+    failed = [
+        {
+            "country": task.get("country"),
+            "source": task.get("source"),
+            "error": str(task.get("error_message") or "")[:200],
+        }
+        for task in (state.get("coverage_tasks") or [])
+        if task.get("status") == "failed" and (task.get("country") in set(missing) or task.get("country") is None)
+    ][-10:]
+    deadline = state.get("deadline_at")
+    minutes_left = None
+    if deadline:
+        minutes_left = max(0, int((datetime.fromisoformat(deadline) - datetime.now(UTC)).total_seconds() // 60))
+    return {
+        "requested_countries": list(state.get("countries") or []),
+        "missing_countries": missing,
+        "failed_collections": failed,
+        "step_that_could_not_finish": state.get("unavailable"),
+        "incoherences": state.get("incoherence") or [],
+        "collection_rounds_so_far": _rounds(state),
+        "max_rounds": MAX_ATTEMPTS,
+        "minutes_until_deadline": minutes_left,
+        "wait_minutes_per_wait": get_settings().source_wait_seconds // 60,
+    }
+
+
+async def decide_node(state: dict) -> dict:
+    """Choose what the run does next, when a fixed rule would choose badly.
+
+    The situation and the allowed actions are worked out here; the choice is
+    the model's (app/agent.py), or the old rule when there is no model. The
+    choice and its reason are recorded — log, trace, the progress line the
+    buyer watches — and carried out by the edges below, through the same
+    nodes as always. Nothing here computes a result.
+    """
+    if state.get("incoherence"):
+        situation = Situation.INCOHERENT
+    elif _source_down(state, incomplete_countries(state)):
+        situation = Situation.SOURCE_DOWN
+    else:
+        situation = Situation.COLLECTION_FAILED
+
+    allowed = allowed_actions(situation, state)
+    facts = _decision_facts(situation, state)
+    decision = await agent.decide(situation, facts, allowed)
+
+    record = {"situation": situation.value, **decision.as_dict(), "allowed": [a.value for a in allowed]}
+    logger.info("AGENT DECISION %s: %s (%s) — %s", situation.value, decision.action.value, decision.decided_by, decision.reason)
+    observability.note(
+        "agent_decision",
+        summary=f"{situation.value}: {decision.action.value} ({decision.decided_by}) — {decision.reason}",
+        detail={**record, "facts": facts},
+    )
+    try:
+        await _client().record_progress(state["analysis_id"], agent.for_progress(decision))
+    except (ScoringUnavailable, ScoringRejected) as exc:
+        logger.warning("Could not record the decision on the analysis: %s", exc)
+
+    update: dict[str, Any] = {"decision": record, "decisions": [record]}
+    if decision.action in (Action.RETRY_LATER, Action.WAIT_AND_RESUME):
+        update["retries"] = int(state.get("retries", 0) or 0) + 1
+    elif decision.action is Action.RECOMPUTE_ONCE:
+        update["recomputed"] = True
+        update["incoherence"] = None
+    elif decision.action is Action.DELIVER_WITH_NOTE:
+        update["delivery_notes"] = [_delivery_note(situation, state)]
+    if decision.action is not Action.RECOMPUTE_ONCE and situation is Situation.INCOHERENT:
+        update["incoherence"] = None
+    return update
+
+
+def _delivery_note(situation: Situation, state: dict) -> dict[str, Any]:
+    """What a note on the delivered answer says, as facts the scoring service
+    and the frontend can word in the buyer's language — not as prose written
+    here, which would be in one language and would be this side's words about
+    the method's result."""
+    note: dict[str, Any] = {"kind": situation.value}
+    missing = incomplete_countries(state)
+    if missing:
+        note["countries_without_score"] = missing
+    if state.get("incoherence"):
+        note["incoherences"] = list(state["incoherence"])
+    return note
+
+
+def after_decision(state: dict) -> str:
+    """Carry the decision out through the nodes that already exist."""
+    decision = state.get("decision") or {}
+    action = Action(decision.get("action", Action.GIVE_UP.value))
+    incoherent = decision.get("situation") == Situation.INCOHERENT.value
+    return {
+        Action.RETRY_LATER: "collect",
+        Action.WAIT_AND_RESUME: "wait",
+        Action.CONTINUE_WITHOUT: "champion",
+        Action.DELIVER_WITH_NOTE: "deliver" if incoherent else "champion",
+        Action.RECOMPUTE_ONCE: "ruler",
+        Action.DELIVER: "deliver",
+        Action.GIVE_UP: "give_up",
+    }[action]
+
+
+# The wait is slept in slices, each one reported: the progress line is what the
+# buyer reads, and its timestamp is the heartbeat the scoring service shows.
+_WAIT_SLICE_SECONDS = 5 * 60
+
+
+async def wait_node(state: dict) -> dict:
+    """Wait for the sources to come back, then go back to collect.
+
+    Never past the deadline. A restart in the middle resumes the wait from the
+    checkpoint before it, which only means waiting again — cheaper than
+    collecting into an outage.
+    """
+    wait = float(get_settings().source_wait_seconds)
+    deadline = state.get("deadline_at")
+    if deadline:
+        wait = min(wait, max(0.0, (datetime.fromisoformat(deadline) - datetime.now(UTC)).total_seconds()))
+    until = datetime.now(UTC) + timedelta(seconds=wait)
+    core = _client()
+    while (left := (until - datetime.now(UTC)).total_seconds()) > 0:
+        try:
+            await core.record_progress(
+                state["analysis_id"], f"waiting for the data sources to come back, until {until:%H:%M} UTC"
+            )
+        except (ScoringUnavailable, ScoringRejected) as exc:
+            logger.warning("Could not report the wait: %s", exc)
+        await asyncio.sleep(min(_WAIT_SLICE_SECONDS, left))
+    return {"unavailable": None}
+
+
+def check_result(state: dict) -> dict:
+    """Whether what is about to be delivered holds together.
+
+    Structure only — no rule of the method is re-applied here. Each check
+    compares two answers the scoring service gave in this run:
+
+    - a requested market that scored is missing from the evidence packet;
+    - the champion was crowned off the request and its row or its evidence
+      did not come back;
+    - the ruler the champion was crowned against is not the ruler the markets
+      were measured against — a requested market above every reference market
+      raises the ruler, and the markets measured before that read against the
+      old one.
+    """
+    problems: list[str] = []
+    requested = set(state.get("countries") or [])
+    scored = {
+        row.get("country")
+        for row in state.get("mos_results") or []
+        if row.get("mos") is not None and row.get("country") in requested
+    }
+    packet = state.get("breakdown")
+    in_packet = {entry.get("country") for entry in (packet or {}).get("countries") or []}
+    if scored and packet is None:
+        problems.append("evidence_missing")
+    elif packet is not None:
+        for country in sorted(scored - in_packet):
+            problems.append(f"requested_country_missing_from_evidence:{country}")
+
+    crowned = state.get("champion") or {}
+    champion = crowned.get("champion_country")
+    if champion and not crowned.get("requested"):
+        if not crowned.get("champion_row"):
+            problems.append(f"champion_row_missing:{champion}")
+        if packet is not None and champion not in in_packet:
+            problems.append(f"champion_without_evidence:{champion}")
+
+    if crowned and not _same_ruler(crowned.get("demand_ceiling"), state.get("demand_ceiling")):
+        problems.append("ruler_moved_after_measuring")
+
+    if problems:
+        logger.warning("INCOHERENT result for %s: %s", state.get("analysis_id"), problems)
+        observability.flag("WARNING", f"incoherent result before delivery: {', '.join(problems)}")
+    return {"incoherence": problems or None}
+
+
+def _same_ruler(a: Any, b: Any) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    return abs(float(a) - float(b)) <= 1e-6 * max(abs(float(a)), abs(float(b)), 1.0)
+
+
+def after_check(state: dict) -> str:
+    return "decide" if state.get("incoherence") else "deliver"
 
 
 async def champion_node(state: dict) -> dict:
@@ -637,10 +913,15 @@ async def deliver_node(state: dict) -> dict:
     """
     results = state.get("mos_results") or []
     requested = set(state["countries"])
+    breakdown = state.get("breakdown")
+    notes = state.get("delivery_notes") or []
+    if notes and breakdown is not None:
+        # The agent's notes travel as facts beside the packet, not inside its
+        # countries: the packet is the scoring service's, and the wording of a
+        # note in the buyer's language is the scoring service's to give.
+        breakdown = {**breakdown, "delivery_notes": notes}
 
-    await _client().complete_analysis(
-        state["analysis_id"], result=results, breakdown=state.get("breakdown")
-    )
+    await _client().complete_analysis(state["analysis_id"], result=results, breakdown=breakdown)
 
     # Measured here, where the buyer actually has the answer — not after the
     # narrative, which is attached a moment later and is not what was waited for.
@@ -712,6 +993,8 @@ async def give_up_node(state: dict) -> dict:
 
     if _past_deadline(state):
         cause = "the sources stayed unavailable for the full retry window"
+    elif state.get("unavailable"):
+        cause = f"the scoring service could not finish {state['unavailable'].split(':', 1)[0]}"
     elif _has_transient_failure(state, missing):
         cause = f"collection kept failing after {state.get('attempts', 0)} attempts"
     elif missing and all(country in absent for country in missing):

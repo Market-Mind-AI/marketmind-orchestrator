@@ -67,6 +67,18 @@ class Settings(BaseSettings):
     checkpointer_db_password: Optional[str] = None
     checkpointer_database_url: Optional[str] = None
 
+    # --- The agent's decisions ---
+    #
+    # When a source fails, stays down, or a result does not hold together, a
+    # model chooses what the run does next from a closed set of actions (see
+    # app/agent.py). Unset key — or the anthropic SDK not installed — means the
+    # fixed rule decides, as it did before the model existed.
+    anthropic_api_key: Optional[str] = None
+    decision_model: str = "claude-sonnet-5-5"
+    # How long one "wait for the source to come back" lasts, at most. Never
+    # past the run's deadline.
+    source_wait_seconds: int = 30 * 60
+
     @property
     def resolved_checkpointer_url(self) -> Optional[str]:
         if self.checkpointer_database_url:

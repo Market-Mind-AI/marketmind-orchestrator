@@ -16,3 +16,10 @@ def _ignore_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     config = dict(Settings.model_config)
     config["env_file"] = None
     monkeypatch.setattr(Settings, "model_config", config)
+
+
+@pytest.fixture(autouse=True)
+def _no_decision_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A key in the shell would send every test's decisions to a real model.
+    Tests that exercise the model put a fake one in its place."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)

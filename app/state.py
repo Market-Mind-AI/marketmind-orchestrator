@@ -88,4 +88,26 @@ class OrchestratorState(TypedDict, total=False):
     # would otherwise be asked forever.
     attempts: int
 
+    # A step the scoring service could not finish (down, or past the timeout),
+    # in words; None once a step succeeds. Sends the run to the decision
+    # instead of failing it.
+    unavailable: str | None
+
+    # What the result failed to hold together on, just before delivery; None
+    # when it holds. Structure only: two of the scoring service's own answers
+    # that disagree.
+    incoherence: list[str] | None
+
+    # The agent's choices (app/agent.py): the last one, which the next edge
+    # carries out, and every one, with its reason, for the record.
+    decision: dict[str, Any] | None
+    decisions: Annotated[list[dict[str, Any]], operator.add]
+    # How many times the agent went back to collect or wait — bounded with the
+    # attempts — and whether it already asked for its one recompute.
+    retries: int
+    recomputed: bool
+    # Facts about what the delivered answer lacks and why, attached beside the
+    # evidence packet when the agent chose to deliver with a note.
+    delivery_notes: Annotated[list[dict[str, Any]], operator.add]
+
     errors: Annotated[list[str], operator.add]
