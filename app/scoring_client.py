@@ -22,9 +22,27 @@ from opentelemetry.propagate import inject
 from app import spend
 from app.config import get_settings
 
-# The scoring service sits next to this one, but some of these calls trigger
-# collection from an upstream API and legitimately take minutes.
+# The scoring service sits next to this one, and most calls answer in seconds.
+# The ones that collect are the exception and get their own timeout (below).
 _TIMEOUT = httpx.Timeout(600.0, connect=5.0)
+
+
+def _collection_timeout(seconds: float | None) -> httpx.Timeout:
+    """For the calls that collect: /coverage/ensure, /candidates/coverage and
+    /champion/crown.
+
+    The scoring service bounds ONE collection gap (dispatch, polling and the
+    final poll — about 1952 s) and runs a country's gaps in sequence inside a
+    single call, so these can take a multiple of that. Six hundred seconds cut
+    them short while the scoring service was still collecting, and the run
+    read its own impatience as a source being down. The caller passes what the
+    run can still afford — its deadline — and outside a run the configured
+    ceiling applies. Only the read is long; connecting stays quick, because a
+    service that does not answer the door is down now, not busy.
+    """
+    if seconds is None:
+        seconds = get_settings().scoring_collection_timeout_max_seconds
+    return httpx.Timeout(seconds, connect=5.0)
 
 
 class ScoringError(RuntimeError):
@@ -84,10 +102,17 @@ class ScoringClient:
         inject(headers)
         return headers
 
-    async def _call(self, method: str, path: str, *, json: dict[str, Any] | None = None) -> Any:
+    async def _call(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        timeout: httpx.Timeout | None = None,
+    ) -> Any:
         url = f"{self._base_url}{path}"
         try:
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=timeout or _TIMEOUT) as client:
                 response = await client.request(method, url, json=json, headers=self._headers())
         except httpx.HTTPError as exc:
             raise ScoringUnavailable(f"{method} {path} failed: {_why(exc)}") from exc
@@ -154,8 +179,13 @@ class ScoringClient:
         answer = await self._call("POST", f"/internal/analyses/{request_id}/claim?runner={runner}")
         return bool(answer.get("granted"))
 
-    async def mark_running(self, request_id: str) -> dict[str, Any]:
-        return await self._call("POST", f"/internal/analyses/{request_id}/running")
+    async def mark_running(self, request_id: str, *, deadline_at: str | None = None) -> dict[str, Any]:
+        """`deadline_at` is how long this run may insist on a source that is
+        down. The scoring service stores it the first time only, so a resumed
+        run sending it again cannot push the end forward — and it is what that
+        service reads to close an analysis left stuck past it."""
+        body = {"deadline_at": deadline_at} if deadline_at else None
+        return await self._call("POST", f"/internal/analyses/{request_id}/running", json=body)
 
     async def record_progress(self, request_id: str, message: str | None) -> dict[str, Any]:
         """Says what the run is waiting on, and that it is alive.
@@ -214,7 +244,13 @@ class ScoringClient:
         )
 
     async def ensure_coverage(
-        self, country_iso3: str, entity_key: str | None, brand_key: str | None = None
+        self,
+        country_iso3: str,
+        entity_key: str | None,
+        period_key: str,
+        brand_key: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """Collect what this country is missing, and report what was tried.
 
@@ -231,11 +267,26 @@ class ScoringClient:
         return await self._call(
             "POST",
             "/internal/coverage/ensure",
-            json={"country_iso3": country_iso3, "entity_key": entity_key, "brand_key": brand_key},
+            json={
+                "country_iso3": country_iso3,
+                "entity_key": entity_key,
+                # The run's period, fixed when it started: the collection
+                # tasks are stamped with it, and a clock read over there would
+                # stamp two months on an analysis that crosses midnight.
+                "period_key": period_key,
+                "brand_key": brand_key,
+            },
+            timeout=_collection_timeout(timeout),
         )
 
     async def candidates_coverage(
-        self, entity_key: str, requested_countries: list[str], period_key: str, brand_key: str | None = None
+        self,
+        entity_key: str,
+        requested_countries: list[str],
+        period_key: str,
+        brand_key: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """Collect the reference markets, unless the period's champion is known.
 
@@ -255,6 +306,7 @@ class ScoringClient:
                 "period_key": period_key,
                 "brand_key": brand_key,
             },
+            timeout=_collection_timeout(timeout),
         )
 
     async def demand_ceiling(

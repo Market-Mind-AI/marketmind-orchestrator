@@ -30,6 +30,16 @@ class Settings(BaseSettings):
     scoring_api_url: str = "http://marketmind-core:8000"
     scoring_internal_token: Optional[str] = None
 
+    # How long to wait on a scoring call that collects. The scoring service
+    # bounds one collection gap at about 1952 s (1800 dispatch + 120 polling +
+    # the final poll) and runs a country's gaps in sequence within one call, so
+    # no fixed figure is above every such call. A run waits as long as its own
+    # deadline allows, never less than the floor — one gap plus margin, so a
+    # run close to its deadline still lets the gap in flight finish. The max is
+    # what a call made outside a run waits.
+    scoring_collection_timeout_floor_seconds: float = 2100.0
+    scoring_collection_timeout_max_seconds: float = 24 * 3600.0
+
     # --- Durable execution ---
     #
     # An analysis can run for hours: it insists on a source that is down rather

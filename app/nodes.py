@@ -129,6 +129,22 @@ def _period_key(now: datetime | None = None) -> str:
     return f"{now.year:04d}-{now.month:02d}"
 
 
+def _collection_timeout(state: dict) -> float | None:
+    """How long a collecting call may take: what is left until the deadline.
+
+    Waiting past the deadline buys nothing — the run gives up there anyway —
+    and waiting less turns the scoring service's own retries into a timeout
+    here. Never below the floor, so a call made near the deadline still lets
+    the gap in flight finish. None outside a run with a deadline, which leaves
+    the client's own ceiling.
+    """
+    deadline = state.get("deadline_at")
+    if not deadline:
+        return None
+    remaining = (datetime.fromisoformat(deadline) - datetime.now(UTC)).total_seconds()
+    return max(remaining, get_settings().scoring_collection_timeout_floor_seconds)
+
+
 async def start_node(state: dict) -> dict:
     """Open the run, and read back what was already decided.
 
@@ -139,7 +155,11 @@ async def start_node(state: dict) -> dict:
     analysis_id = state["analysis_id"]
     core = _client()
     stored = await core.read_analysis(analysis_id)
-    await core.mark_running(analysis_id)
+    # Decided here and only here, then carried in the checkpoint — and told to
+    # the scoring service, which stores the first one it hears and is what
+    # closes an analysis left stuck past it. A resumed run sends the same one.
+    deadline_at = state.get("deadline_at") or (datetime.now(UTC) + INSIST_FOR).isoformat()
+    await core.mark_running(analysis_id, deadline_at=deadline_at)
     _note_catalogo(stored)
 
     return {
@@ -153,7 +173,7 @@ async def start_node(state: dict) -> dict:
         # Decided here and only here, then carried in the checkpoint.
         "period_key": state.get("period_key") or _period_key(),
         "started_at": state.get("started_at") or datetime.now(UTC).isoformat(),
-        "deadline_at": state.get("deadline_at") or (datetime.now(UTC) + INSIST_FOR).isoformat(),
+        "deadline_at": deadline_at,
         "attempts": state.get("attempts", 0),
     }
 
@@ -307,7 +327,13 @@ async def collect_node(state: dict, store: BaseStore | None = None) -> dict:
 
         await core.record_progress(analysis_id, f"collecting {country}")
         try:
-            answer = await core.ensure_coverage(country, entity_key, state.get("brand_key"))
+            answer = await core.ensure_coverage(
+                country,
+                entity_key,
+                state["period_key"],
+                state.get("brand_key"),
+                timeout=_collection_timeout(state),
+            )
             # The words this country was actually searched for. Logged because
             # they are the one thing a model chose that nothing else exposes:
             # get the native term wrong and the analysis is immaculate and
@@ -459,7 +485,11 @@ async def ruler_node(state: dict) -> dict:
     core = _client()
     await core.record_progress(state["analysis_id"], "settling the demand ruler")
     known = await core.candidates_coverage(
-        entity_key, state["countries"], state["period_key"], state.get("brand_key")
+        entity_key,
+        state["countries"],
+        state["period_key"],
+        state.get("brand_key"),
+        timeout=_collection_timeout(state),
     )
     # O passo mais caro do sistema, e até 23/09/2026 o único sem relato nenhum:
     # a coleta dos mercados de referência não devolvia nada, então nem o custo

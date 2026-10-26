@@ -65,7 +65,7 @@ async def test_a_refusal_is_not_retryable_and_carries_the_reason() -> None:
     )
 
     with pytest.raises(ScoringRejected) as excinfo:
-        await _client().ensure_coverage("ESP", None)
+        await _client().ensure_coverage("ESP", None, "2026-09")
 
     assert excinfo.value.status_code == 401
     assert "X-Internal-Token" in excinfo.value.detail
@@ -90,9 +90,58 @@ async def test_coverage_answers_with_the_tasks_it_dispatched() -> None:
         )
     )
 
-    answer = await _client().ensure_coverage("ESP", "e1")
+    answer = await _client().ensure_coverage("ESP", "e1", "2026-09")
 
     assert [t["status"] for t in answer["tasks"]] == ["failed"]
+
+
+@respx.mock
+async def test_coverage_carries_the_runs_period() -> None:
+    """The collection tasks are stamped with it. A period read off a clock
+    over there would stamp two months on an analysis that crosses midnight."""
+    route = respx.post(f"{_BASE}/internal/coverage/ensure").mock(
+        return_value=httpx.Response(200, json={"country": "ESP", "tasks": []})
+    )
+
+    await _client().ensure_coverage("ESP", "e1", "2026-09")
+
+    assert json.loads(route.calls.last.request.content)["period_key"] == "2026-09"
+
+
+async def test_a_collecting_call_waits_longer_than_one_gap(monkeypatch) -> None:
+    """Six hundred seconds cut a collection short while the scoring service was
+    still inside its own retries for one gap (up to about 1952 s)."""
+    seen: list[httpx.Timeout] = []
+    original = httpx.AsyncClient.__init__
+
+    def spy(self, *args, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        original(self, *args, **kwargs)
+
+    async def answer(self, *args, **kwargs):
+        return httpx.Response(200, json={"tasks": []})
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", spy)
+    monkeypatch.setattr(httpx.AsyncClient, "request", answer)
+
+    await _client().ensure_coverage("ESP", "e1", "2026-09", timeout=5000.0)
+    await _client().ensure_coverage("ESP", "e1", "2026-09")
+    await _client().compute_mos("e1", ["ESP"], "2026-09")
+
+    assert seen[0].read == 5000.0
+    assert seen[1].read > 1952, "outside a run the configured ceiling applies"
+    assert seen[2].read == 600.0, "a call that does not collect keeps the short timeout"
+
+
+@respx.mock
+async def test_the_deadline_is_sent_when_the_run_starts() -> None:
+    route = respx.post(f"{_BASE}/internal/analyses/r1/running").mock(
+        return_value=httpx.Response(200, json={"request_id": "r1", "status": "running"})
+    )
+
+    await _client().mark_running("r1", deadline_at="2026-10-27T10:00:00+00:00")
+
+    assert json.loads(route.calls.last.request.content) == {"deadline_at": "2026-10-27T10:00:00+00:00"}
 
 
 @respx.mock

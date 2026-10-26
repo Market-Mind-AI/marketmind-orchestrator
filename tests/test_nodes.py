@@ -142,6 +142,30 @@ async def test_a_fresh_run_decides_the_period_and_the_deadline(monkeypatch: pyte
     assert started["period_key"] == nodes._period_key()
     assert started["deadline_at"] is not None
     assert started["attempts"] == 0
+    # The scoring service is told the same deadline: it is what closes an
+    # analysis left stuck past it, and it was never written before.
+    assert client.mark_running.await_args.kwargs["deadline_at"] == started["deadline_at"]
+
+
+async def test_a_resumed_run_sends_its_original_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import AsyncMock
+
+    client = AsyncMock()
+    client.read_analysis = AsyncMock(return_value={"entity_key": "e1", "countries": ["ESP"]})
+    monkeypatch.setattr(nodes, "_client", lambda: client)
+
+    await nodes.start_node({"analysis_id": "a1", "deadline_at": "2026-10-27T10:00:00+00:00"})
+
+    assert client.mark_running.await_args.kwargs["deadline_at"] == "2026-10-27T10:00:00+00:00"
+
+
+def test_a_collecting_call_may_take_what_is_left_until_the_deadline() -> None:
+    far = nodes._collection_timeout({"deadline_at": (datetime.now(UTC) + timedelta(hours=10)).isoformat()})
+    near = nodes._collection_timeout({"deadline_at": (datetime.now(UTC) + timedelta(seconds=30)).isoformat()})
+
+    assert 9.9 * 3600 < far <= 10 * 3600
+    assert near == nodes.get_settings().scoring_collection_timeout_floor_seconds
+    assert near > 1952, "never below one gap of the scoring service's own collection"
 
 
 # --- o que o trace passa a dizer (23/09/2026) -------------------------------

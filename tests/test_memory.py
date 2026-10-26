@@ -336,7 +336,8 @@ async def test_a_declared_market_is_never_sent_to_the_scoring_client_for_collect
 
     # A marca viaja junto desde 24/09/2026: é ela que decide qual vocabulário
     # a coleta mede. Nula aqui, que é o caso do produto sem marca.
-    full_run.ensure_coverage.assert_awaited_once_with("ESP", "e1", None)
+    full_run.ensure_coverage.assert_awaited_once()
+    assert full_run.ensure_coverage.await_args.args[0] == "ESP"
 
 
 async def test_giving_up_flags_the_trace_as_an_error_with_the_reason(core: AsyncMock, monkeypatch) -> None:
