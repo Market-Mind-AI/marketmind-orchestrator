@@ -13,10 +13,9 @@ from app.scoring_client import ScoringRejected, ScoringUnavailable
 @pytest.fixture
 def scoring(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     client = AsyncMock()
-    client.resolve_product = AsyncMock(
-        return_value={"entity_key": "e1", "canonical_title": "air fryer"}
+    client.register_analysis = AsyncMock(
+        return_value={"request_id": "r1", "status": "pending", "entity_key": "e1", "canonical_title": "air fryer"}
     )
-    client.register_analysis = AsyncMock(return_value={"request_id": "r1", "status": "pending"})
     client.read_report = AsyncMock(return_value={"request_id": "r1", "status": "done"})
     client.countries = AsyncMock(return_value=[{"iso3": "ESP", "name": "Spain"}])
     client.identify_image = AsyncMock(return_value={"product_name": "air fryer"})
@@ -42,7 +41,7 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
-def test_analyze_resolves_then_opens_the_record_then_starts_the_run(
+def test_analyze_registers_in_one_call_then_starts_the_run(
     scoring: AsyncMock, started: list[str]
 ) -> None:
     response = _client().post(
@@ -54,13 +53,12 @@ def test_analyze_resolves_then_opens_the_record_then_starts_the_run(
     assert response.json() == {"request_id": "r1", "status": "pending"}
     # 202 and not 200: the run takes minutes, and a request held open for it is
     # a request a proxy will cut.
-    scoring.resolve_product.assert_awaited_once()
-    assert scoring.resolve_product.await_args.kwargs["brand"] == "Philips"
     scoring.register_analysis.assert_awaited_once()
+    assert scoring.register_analysis.await_args.args[0]["brand"] == "Philips"
     assert started == ["r1"]
 
 
-def test_the_curated_vocabulary_is_carried_into_the_resolve(
+def test_the_curated_vocabulary_is_carried_into_the_registration(
     scoring: AsyncMock, started: list[str]
 ) -> None:
     """The identify step already produced it, with whatever the buyer corrected.
@@ -79,7 +77,7 @@ def test_the_curated_vocabulary_is_carried_into_the_resolve(
         },
     )
 
-    kwargs = scoring.resolve_product.await_args.kwargs
+    kwargs = scoring.register_analysis.await_args.args[0]
     assert kwargs["localized_markets"] == markets
     assert kwargs["reference_candidates"] == candidates
 
@@ -103,26 +101,25 @@ def test_a_scoring_outage_answers_503_and_a_rejection_answers_its_own_status(
 ) -> None:
     """The browser is owed the difference: one is worth retrying, the other is
     the request being wrong."""
-    scoring.resolve_product = AsyncMock(side_effect=ScoringUnavailable("down"))
+    scoring.register_analysis = AsyncMock(side_effect=ScoringUnavailable("down"))
     assert _client().post("/analyze", json={"product_name": "x", "countries": ["ESP"]}).status_code == 503
 
-    scoring.resolve_product = AsyncMock(side_effect=ScoringRejected(422, "unknown market"))
+    scoring.register_analysis = AsyncMock(side_effect=ScoringRejected(422, "unknown market"))
     response = _client().post("/analyze", json={"product_name": "x", "countries": ["ZZZ"]})
     assert response.status_code == 422
     assert response.json()["detail"] == "unknown market"
 
 
-def test_nothing_is_opened_when_the_product_cannot_be_resolved(
+def test_no_run_starts_when_the_product_cannot_be_registered(
     scoring: AsyncMock, started: list[str]
 ) -> None:
     """The failure people saw: the product came back named and the analysis
-    failed anyway, because resolving happened somewhere else from running. Both
-    are here now, so a resolve that fails opens no record and starts no run."""
-    scoring.resolve_product = AsyncMock(side_effect=ScoringUnavailable("down"))
+    failed anyway, because resolving happened somewhere else from running. A
+    registration that fails starts no run."""
+    scoring.register_analysis = AsyncMock(side_effect=ScoringUnavailable("down"))
 
     _client().post("/analyze", json={"product_name": "air fryer", "countries": ["ESP"]})
 
-    scoring.register_analysis.assert_not_awaited()
     assert started == []
 
 
@@ -337,7 +334,7 @@ def test_the_interface_language_is_registered_with_the_analysis(scoring: AsyncMo
     choice, so it travels with the record and a resumed run reads it back."""
     _client().post("/analyze", json={"product_name": "air fryer", "countries": ["ESP"], "language": "ES"})
 
-    assert scoring.register_analysis.await_args.kwargs["language"] == "es"
+    assert scoring.register_analysis.await_args.args[0]["language"] == "es"
 
 
 def test_no_language_asked_for_leaves_the_default_to_the_scoring_service(
@@ -345,4 +342,4 @@ def test_no_language_asked_for_leaves_the_default_to_the_scoring_service(
 ) -> None:
     _client().post("/analyze", json={"product_name": "air fryer", "countries": ["ESP"]})
 
-    assert scoring.register_analysis.await_args.kwargs["language"] is None
+    assert scoring.register_analysis.await_args.args[0]["language"] is None

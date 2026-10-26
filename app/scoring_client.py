@@ -105,41 +105,6 @@ class ScoringClient:
 
     # --- identity ---
 
-    async def resolve_product(
-        self,
-        text: str,
-        *,
-        source: str = "orchestrator",
-        brand: str | None = None,
-        category: str | None = None,
-        localized_markets: dict[str, Any] | None = None,
-        reference_candidates: list[dict[str, Any]] | None = None,
-        target_age_min: int | None = None,
-        target_age_max: int | None = None,
-    ) -> dict[str, Any]:
-        """Text to a stable entity. The brand PARTITIONS identity rather than
-        being concatenated into the text that decides similarity.
-
-        `localized_markets` and `reference_candidates` are the curated vocabulary
-        the identify step already produced, carried through with whatever the
-        buyer corrected. Without them the resolve would throw that work away and
-        the enrichment would pay for it again.
-        """
-        return await self._call(
-            "POST",
-            "/catalog/resolve",
-            json={
-                "text": text,
-                "source": source,
-                "brand": brand,
-                "category": category,
-                "localized_markets": localized_markets,
-                "reference_candidates": reference_candidates,
-                "target_age_min": target_age_min,
-                "target_age_max": target_age_max,
-            },
-        )
-
     async def identify_image(self, payload: dict[str, Any]) -> dict[str, Any]:
         """One photo (or one line of text) to a named product with a per-country
         vocabulary. The buyer sees and corrects this before anything is scored."""
@@ -158,8 +123,17 @@ class ScoringClient:
 
     # --- the analysis record ---
 
-    async def register_analysis(self, **payload: Any) -> dict[str, Any]:
-        return await self._call("POST", "/internal/analyses", json=payload)
+    async def register_analysis(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Resolve the product and open the record, in one call.
+
+        The same body as POST /analyze. Resolving here and registering in a
+        second call was two halves of one decision split across services: the
+        curated vocabulary and the buyer's edits reached the resolve, and the
+        check of those edits and the brand fields were the registering side's
+        to remember. The scoring service does both in one place now, and answers
+        with what it resolved.
+        """
+        return await self._call("POST", "/internal/analyses/register", json=payload)
 
     async def read_analysis(self, request_id: str) -> dict[str, Any]:
         return await self._call("GET", f"/internal/analyses/{request_id}")

@@ -72,7 +72,7 @@ async def countries() -> Any:
 
 @router.post("/analyze", status_code=202, summary="Analyse a product across markets")
 async def analyze(payload: dict[str, Any]) -> dict[str, Any]:
-    """Resolve the product, open the record, and start the run.
+    """Register the analysis with the scoring service, and start the run.
 
     Answers 202 with the id and lets the caller watch: the run takes minutes and
     a request held open for it is a request a proxy will cut.
@@ -91,44 +91,32 @@ async def analyze(payload: dict[str, Any]) -> dict[str, Any]:
 
     core = _client()
     try:
-        # The brand PARTITIONS identity: a request naming a brand resolves to
-        # that brand's entity, with the generic family linked behind it.
-        resolved = await core.resolve_product(
-            product_name,
-            source="analyze",
-            brand=payload.get("brand"),
-            category=payload.get("category"),
-            localized_markets=payload.get("localized_markets"),
-            reference_candidates=payload.get("reference_candidates"),
-            target_age_min=payload.get("target_age_min"),
-            target_age_max=payload.get("target_age_max"),
-        )
+        # One call, the whole request. The scoring service resolves the product
+        # with everything the identify step produced — the curated vocabulary,
+        # the reference candidates, the brand — checks what the buyer edited
+        # before it enters the shared catalogue, and opens the record with how
+        # the catalogue matched. Resolving here and registering separately
+        # dropped the edits' review and left the brand fields to whoever
+        # remembered to copy them.
         registered = await core.register_analysis(
-            entity_key=resolved["entity_key"],
-            canonical_title=resolved["canonical_title"],
-            # Como o catálogo chegou nesta entidade, guardado com a análise.
-            # Aqui ainda não há trace do Langfuse — ele nasce quando o grafo
-            # roda, adiante — e uma retomada nunca repete esta resolução. Sem
-            # gravar, o fato se perde nos dois casos.
-            catalog_method=resolved.get("method"),
-            catalog_match_score=resolved.get("match_score"),
-            catalog_match_reasoning=resolved.get("match_reasoning"),
-            # O que o comprador digitou, guardado ao lado do que o catálogo
-            # respondeu: sem o par, uma resolução não é auditável.
-            catalog_query_text=product_name,
-            # O vínculo da marca, que é metade da resposta: a análise fica
-            # ligada ao produto E à marca, e nulo aqui significa "foi do
-            # produto" — é isso que separa uma coisa da outra depois.
-            brand_key=resolved.get("brand_key"),
-            brand_name=resolved.get("brand"),
-            countries=countries_asked,
-            estimated_price=payload.get("estimated_price"),
-            price_currency=payload.get("price_currency"),
-            user_prompt=payload.get("user_prompt"),
-            # The language of the buyer's interface, which is the language the
-            # narrative comes out in. Stored with the record, so a resumed run
-            # writes in the same one; absent means the scoring service's default.
-            language=_language(payload.get("language")),
+            {
+                "product_name": product_name,
+                "brand": payload.get("brand"),
+                "category": payload.get("category"),
+                "localized_markets": payload.get("localized_markets"),
+                "reference_candidates": payload.get("reference_candidates"),
+                "target_age_min": payload.get("target_age_min"),
+                "target_age_max": payload.get("target_age_max"),
+                "estimated_price": payload.get("estimated_price"),
+                "price_currency": payload.get("price_currency"),
+                "user_prompt": payload.get("user_prompt"),
+                "countries": countries_asked,
+                # The language of the buyer's interface, which is the language
+                # the narrative comes out in. Stored with the record, so a
+                # resumed run writes in the same one; absent means the scoring
+                # service's default.
+                "language": _language(payload.get("language")),
+            }
         )
     except (ScoringUnavailable, ScoringRejected) as exc:
         raise _as_http_error(exc) from exc

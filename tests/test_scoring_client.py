@@ -17,11 +17,11 @@ def _client() -> ScoringClient:
 async def test_the_token_travels_on_every_call() -> None:
     """The tools write — they register analyses, collect, complete requests — so
     without the secret the service refuses them."""
-    route = respx.post(f"{_BASE}/internal/analyses").mock(
+    route = respx.post(f"{_BASE}/internal/analyses/register").mock(
         return_value=httpx.Response(201, json={"request_id": "r1", "status": "pending"})
     )
 
-    await _client().register_analysis(countries=["ESP"])
+    await _client().register_analysis({"product_name": "x", "countries": ["ESP"]})
 
     assert route.calls.last.request.headers["X-Internal-Token"] == "secret"
 
@@ -30,9 +30,9 @@ async def test_the_token_travels_on_every_call() -> None:
 async def test_no_token_sends_no_header_rather_than_an_empty_one() -> None:
     """An empty header reads like a configuration that was attempted. An absent
     one reads like one that was never made, which is the truth."""
-    route = respx.post(f"{_BASE}/internal/analyses").mock(return_value=httpx.Response(201, json={}))
+    route = respx.post(f"{_BASE}/internal/analyses/register").mock(return_value=httpx.Response(201, json={}))
 
-    await ScoringClient(base_url=_BASE, token=None).register_analysis(countries=["ESP"])
+    await ScoringClient(base_url=_BASE, token=None).register_analysis({"product_name": "x", "countries": ["ESP"]})
 
     assert "X-Internal-Token" not in route.calls.last.request.headers
 
@@ -42,18 +42,18 @@ async def test_no_token_sends_no_header_rather_than_an_empty_one() -> None:
 
 @respx.mock
 async def test_an_unreachable_service_is_retryable() -> None:
-    respx.post(f"{_BASE}/internal/analyses").mock(side_effect=httpx.ConnectError("refused"))
+    respx.post(f"{_BASE}/internal/analyses/register").mock(side_effect=httpx.ConnectError("refused"))
 
     with pytest.raises(ScoringUnavailable):
-        await _client().register_analysis(countries=["ESP"])
+        await _client().register_analysis({"product_name": "x", "countries": ["ESP"]})
 
 
 @respx.mock
 async def test_a_server_error_is_retryable() -> None:
-    respx.post(f"{_BASE}/internal/analyses").mock(return_value=httpx.Response(503, json={"detail": "down"}))
+    respx.post(f"{_BASE}/internal/analyses/register").mock(return_value=httpx.Response(503, json={"detail": "down"}))
 
     with pytest.raises(ScoringUnavailable):
-        await _client().register_analysis(countries=["ESP"])
+        await _client().register_analysis({"product_name": "x", "countries": ["ESP"]})
 
 
 @respx.mock
