@@ -970,6 +970,7 @@ async def narrate_node(state: dict) -> dict:
             state.get("user_prompt"),
             brand=state.get("brand_name"),
             language=state.get("language"),
+            request_id=state["analysis_id"],
         )
         await core.attach_narrative(state["analysis_id"], narrative)
         await core.record_progress(state["analysis_id"], None)

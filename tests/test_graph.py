@@ -183,6 +183,8 @@ async def test_it_says_the_explanation_is_coming_before_writing_it(core: AsyncMo
     # In the language the record asked for — read back at the start, so a
     # resumed run writes in the same one.
     assert core.narrate.await_args.kwargs["language"] == "es"
+    # A análise vai junto, para o texto aparecer na tela enquanto é escrito.
+    assert core.narrate.await_args.kwargs["request_id"] == "a1"
 
 
 async def test_any_failure_while_narrating_leaves_the_answer_delivered(core: AsyncMock) -> None:

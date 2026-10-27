@@ -445,10 +445,13 @@ class ScoringClient:
         *,
         brand: str | None = None,
         language: str | None = None,
+        request_id: str | None = None,
     ) -> str | None:
         """`language` is the one the analysis asked for (the buyer's interface
         language, read back from the record). None leaves it to the scoring
-        service's configured default."""
+        service's configured default. With `request_id`, the scoring service
+        stores the text in that analysis while the model writes it, so the
+        screen shows it before it ends."""
         body = await self._call(
             "POST",
             "/internal/narrate",
@@ -458,6 +461,7 @@ class ScoringClient:
                 "brand": brand,
                 "user_prompt": user_prompt,
                 "language": language,
+                "request_id": request_id,
             },
         )
         return body.get("narrative")
