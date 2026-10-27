@@ -155,17 +155,9 @@ Never state numbers in the reason. Never invent data: you only choose what happe
 
 
 def _chooser() -> Chooser | None:
-    """The model, when one is configured and its SDK is installed; None
-    otherwise, which means the fixed rule."""
-    settings = get_settings()
-    if not settings.anthropic_api_key:
-        return None
-    try:
-        import anthropic  # noqa: F401 — optional: not a declared dependency yet
-    except ImportError:
-        logger.warning("ANTHROPIC_API_KEY is set but the anthropic SDK is not installed; the fixed rule applies")
-        return None
-    return _ask_claude
+    """The model, when a key is configured; None otherwise, which means the
+    fixed rule."""
+    return _ask_claude if get_settings().anthropic_api_key else None
 
 
 async def _ask_claude(situation: Situation, facts: dict[str, Any], allowed: list[Action]) -> tuple[str, str]:

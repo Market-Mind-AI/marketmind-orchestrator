@@ -71,8 +71,8 @@ class Settings(BaseSettings):
     #
     # When a source fails, stays down, or a result does not hold together, a
     # model chooses what the run does next from a closed set of actions (see
-    # app/agent.py). Unset key — or the anthropic SDK not installed — means the
-    # fixed rule decides, as it did before the model existed.
+    # app/agent.py). An unset key means the fixed rule decides, as it did
+    # before the model existed.
     anthropic_api_key: Optional[str] = None
     decision_model: str = "claude-sonnet-5-5"
     # How long one "wait for the source to come back" lasts, at most. Never
