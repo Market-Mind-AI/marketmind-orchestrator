@@ -37,6 +37,10 @@ MAX_ATTEMPTS = 3
 # drift apart.
 _NO_DATA_CAUSE = "the sources do not hold the data for these markets"
 
+# Countries collected or measured at once. Each is one request to the scoring
+# service; three is a usual request's size and well within what it serves.
+_PAISES_EM_PARALELO = 3
+
 
 def _client() -> ScoringClient:
     return ScoringClient()
@@ -203,15 +207,18 @@ async def enrich_node(state: dict) -> dict:
     core = _client()
     await core.record_progress(state["analysis_id"], "preparing the product's vocabulary")
     marca = state.get("brand_key")
-    await core.enrich_terms(entity_key, state["countries"], with_candidates=True, brand_key=marca)
+    pedidos = [core.enrich_terms(entity_key, state["countries"], with_candidates=True, brand_key=marca)]
 
     # A CATEGORIA do mesmo produto, quando a análise é de marca: desde
     # 24/09/2026 não há entidade-família, é o outro vocabulário da MESMA
     # entidade (sem marca). Sem candidatos, porque a régua de demanda é da
     # marca e a categoria é a escala contra a qual ela se lê — contexto, nunca
-    # pontuado.
+    # pontuado. Junto com o da marca: são dois vocabulários gravados em lugares
+    # diferentes, e em série o da categoria era mais um minuto de modelo
+    # (72 s na serra circular Makita, 29/10/2026).
     if marca:
-        await core.enrich_terms(entity_key, state["countries"], with_candidates=False, brand_key=None)
+        pedidos.append(core.enrich_terms(entity_key, state["countries"], with_candidates=False, brand_key=None))
+    await asyncio.gather(*pedidos)
     return {}
 
 
@@ -241,48 +248,62 @@ async def collect_node(state: dict) -> dict:
     sem_cobertura: dict[str, list[str]] = {}
     relacionadas_frescas = 0
     absent = await _absent_markets(core, state)
-    for country in state["countries"]:
-        if country in absent:
-            continue
+    pendentes = [c for c in state["countries"] if c not in absent]
+    if pendentes:
+        await core.record_progress(analysis_id, f"collecting {', '.join(pendentes)}")
 
-        await core.record_progress(analysis_id, f"collecting {country}")
-        try:
-            answer = await core.ensure_coverage(
-                country,
-                entity_key,
-                state["period_key"],
-                state.get("brand_key"),
-                timeout=_collection_timeout(state),
-            )
-            # The words this country was actually searched for. Logged because
-            # they are the one thing a model chose that nothing else exposes:
-            # get the native term wrong and the analysis is immaculate and
-            # about the wrong product.
-            logger.info(
-                "SEARCH TERMS %s (%s, %s): product=%s | category=%s",
-                country,
-                answer.get("location"),
-                answer.get("language"),
-                answer.get("search_terms"),
-                answer.get("category_terms"),
-            )
-            tasks.extend(answer.get("tasks", []))
-            # O outro lado da conta, que as tarefas não contam: o que já estava
-            # no banco nem vira tarefa. Sem isto uma fonte inteiramente
-            # aproveitada some do relato.
-            for fonte, quantos in (answer.get("reused") or {}).items():
-                reaproveitado[fonte] = reaproveitado.get(fonte, 0) + quantos
-            for fonte in answer.get("not_covering") or []:
-                sem_cobertura.setdefault(fonte, []).append(country)
-            if answer.get("related_fresh"):
-                relacionadas_frescas += 1
-            collected.append(country)
-        except ScoringUnavailable as exc:
+    # The countries at once, a few at a time. Each one is its own request to
+    # the scoring service, which waits on the sources for it; one after the
+    # other they were 25 to 35 seconds each, three countries being the usual
+    # request (29/10/2026). The answers are read back in the order asked.
+    limite = asyncio.Semaphore(_PAISES_EM_PARALELO)
+
+    async def _coletar(country: str) -> tuple[dict[str, Any] | None, ScoringUnavailable | None]:
+        async with limite:
+            try:
+                answer = await core.ensure_coverage(
+                    country,
+                    entity_key,
+                    state["period_key"],
+                    state.get("brand_key"),
+                    timeout=_collection_timeout(state),
+                )
+            except ScoringUnavailable as exc:
+                return None, exc
+            return answer, None
+
+    respostas = await asyncio.gather(*(_coletar(c) for c in pendentes))
+    for country, (answer, exc) in zip(pendentes, respostas, strict=True):
+        if exc is not None:
             # Transient by definition. Recorded, not raised: one country's
             # source being down must not abandon the others' collection.
             logger.warning("Collection for %s could not run: %s", country, exc)
             observability.flag("WARNING", f"collection for {country} could not run: {exc}")
             tasks.append({"country": country, "status": "failed", "error_message": str(exc)})
+            continue
+        # The words this country was actually searched for. Logged because
+        # they are the one thing a model chose that nothing else exposes:
+        # get the native term wrong and the analysis is immaculate and
+        # about the wrong product.
+        logger.info(
+            "SEARCH TERMS %s (%s, %s): product=%s | category=%s",
+            country,
+            answer.get("location"),
+            answer.get("language"),
+            answer.get("search_terms"),
+            answer.get("category_terms"),
+        )
+        tasks.extend(answer.get("tasks", []))
+        # O outro lado da conta, que as tarefas não contam: o que já estava
+        # no banco nem vira tarefa. Sem isto uma fonte inteiramente
+        # aproveitada some do relato.
+        for fonte, quantos in (answer.get("reused") or {}).items():
+            reaproveitado[fonte] = reaproveitado.get(fonte, 0) + quantos
+        for fonte in answer.get("not_covering") or []:
+            sem_cobertura.setdefault(fonte, []).append(country)
+        if answer.get("related_fresh"):
+            relacionadas_frescas += 1
+        collected.append(country)
 
     _note_fontes(
         tasks, reused=reaproveitado, not_covering=sem_cobertura, related_fresh=relacionadas_frescas
@@ -489,9 +510,10 @@ async def measure_node(state: dict) -> dict:
     """
     core = _client()
     analysis_id = state["analysis_id"]
-    try:
-        for country in state["countries"]:
-            await core.record_progress(analysis_id, f"measuring {country}")
+    limite = asyncio.Semaphore(_PAISES_EM_PARALELO)
+
+    async def _medir(country: str) -> None:
+        async with limite:
             await core.compute_indicators(
                 state.get("entity_key"),
                 country,
@@ -499,6 +521,12 @@ async def measure_node(state: dict) -> dict:
                 state.get("demand_ceiling"),
                 state.get("brand_key"),
             )
+
+    try:
+        await core.record_progress(analysis_id, f"measuring {', '.join(state['countries'])}")
+        # The countries at once, like the collection: each is measured from
+        # what is already stored, and in series they were 6 to 18 seconds each.
+        await asyncio.gather(*(_medir(c) for c in state["countries"]))
         await core.calibrate_weights(state["period_key"])
     except ScoringUnavailable as exc:
         return _unavailable("measuring the markets", exc)
